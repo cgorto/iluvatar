@@ -21,7 +21,7 @@ pub struct PendingExtraction;
 /// Temporary storage for extracted frame data
 #[derive(Component)]
 pub struct ExtractedFrame {
-    pub frame: GrayscaleFrame,
+    pub frame: GrayscaleFrame<Vec<u8>>,
     pub pose: CameraPose,
     pub timestamp: u64,
 }

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 iluvatar-core = { workspace = true }
 iluvatar-camera = { workspace = true }
+iluvatar-server = { workspace = true }
 glam = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

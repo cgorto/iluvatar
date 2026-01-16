@@ -452,6 +452,31 @@ impl TestScenario {
         }
     }
 
+    /// Loop-de-loop stress test
+    pub fn loop_de_loop() -> Self {
+        Self {
+            name: "Loop-de-loop".to_string(),
+            targets: vec![TargetSpec {
+                motion: MotionSpec::Path {
+                    points: vec![
+                        Vec3::new(-100.0, 20.0, 0.0),
+                        Vec3::new(-50.0, 20.0, 0.0),
+                        Vec3::new(0.0, 60.0, 0.0),    // Top of loop
+                        Vec3::new(0.0, 20.0, 0.0),    // Bottom of loop crossing
+                        Vec3::new(-20.0, 40.0, 20.0), // Spiral out
+                        Vec3::new(50.0, 20.0, 0.0),
+                        Vec3::new(100.0, 20.0, 0.0),
+                    ],
+                    speed: 25.0, // Fast!
+                    loop_mode: LoopMode::PingPong,
+                },
+                size: 2.0,
+                color: Color::srgb(1.0, 0.0, 1.0), // Hot pink
+            }],
+            duration: 30.0,
+        }
+    }
+
     /// Get all available scenarios
     pub fn all() -> Vec<TestScenario> {
         vec![
@@ -461,6 +486,7 @@ impl TestScenario {
             Self::curved_path(),
             Self::figure_eight(),
             Self::swarm(),
+            Self::loop_de_loop(),
         ]
     }
 

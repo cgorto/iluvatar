@@ -1,5 +1,5 @@
 use glam::{UVec2, Vec2};
-use iluvatar_core::{CameraId, CameraIntrinsics, Fov, RaymarchConfig};
+use iluvatar_core::{CameraId, CameraIntrinsics, Fov, GeoOrigin, RaymarchConfig};
 use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
@@ -60,6 +60,7 @@ pub struct ProcessingConfig {
     pub motion_threshold_percent: f32,
     #[serde(default)]
     pub raymarch: RaymarchSettings,
+    pub grid_origin: Option<GeoOrigin>,
 }
 
 fn default_difference_threshold() -> u8 {

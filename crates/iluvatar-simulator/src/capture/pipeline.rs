@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use iluvatar_camera::capture::GrayscaleFrame;
+use iluvatar_camera::{arena::FrameArena, capture::GrayscaleFrame};
 use iluvatar_core::CameraFrame;
 
 use super::components::{CaptureState, RaymarcherInstances};
@@ -20,6 +20,7 @@ pub fn process_captured_frames(
     raymarchers: Res<RaymarcherInstances>,
     mut captured_frames: ResMut<CapturedFrames>,
     mut query: Query<(Entity, &SimulatedCamera, &mut CaptureState, &ExtractedFrame)>,
+    mut arena: Local<FrameArena>,
 ) {
     for (entity, sim_camera, mut state, extracted) in query.iter_mut() {
         // Clone the grayscale frame (FrameProcessor takes ownership)
@@ -30,7 +31,7 @@ pub fn process_captured_frames(
         };
 
         // Compute difference mask
-        let diff_result = state.frame_processor.compute_difference(grayscale);
+        let diff_result = state.frame_processor.compute_difference(&grayscale, &arena);
 
         if diff_result.is_none() {
             tracing::debug!(
@@ -81,6 +82,9 @@ pub fn process_captured_frames(
 
         // Clean up extracted frame component
         commands.entity(entity).remove::<ExtractedFrame>();
+
+        // Reset arena for next camera/frame
+        arena.reset();
     }
 }
 

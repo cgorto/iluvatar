@@ -40,6 +40,7 @@ pub fn setup_capture_cameras(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     config: Res<CaptureConfig>,
+    origin: Res<super::config::SimulatorOrigin>,
     simulated_cameras: Query<(Entity, &SimulatedCamera)>,
     mut raymarchers: ResMut<RaymarcherInstances>,
 ) {
@@ -95,6 +96,7 @@ pub fn setup_capture_cameras(
             config.raymarch_config.clone(),
             config.grid_bounds,
             config.voxel_size,
+            origin.geo_position,
         );
         raymarchers
             .instances

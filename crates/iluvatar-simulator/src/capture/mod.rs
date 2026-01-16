@@ -61,8 +61,13 @@ fn integrate_with_validation(
     captured_frames: Res<CapturedFrames>,
     config: Res<CaptureConfig>,
     mut metrics: ResMut<crate::validation::ValidationMetrics>,
+    mut tracker_sim: Option<ResMut<crate::validation::TrackerSimulation>>,
 ) {
     for frame in &captured_frames.frames {
         metrics.record_captured_frame(frame, &config);
+
+        if let Some(ref mut sim) = tracker_sim {
+            sim.grid.add_frame(frame);
+        }
     }
 }

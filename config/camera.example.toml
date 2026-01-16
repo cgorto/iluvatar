@@ -25,6 +25,12 @@ difference_threshold = 25
 # Minimum percentage of frame with motion before transmitting (0.0-100.0)
 motion_threshold_percent = 0.1
 
+# Grid origin (must match server config)
+[processing.grid_origin]
+latitude = 47.6062
+longitude = -122.3321
+altitude = 0.0
+
 [processing.raymarch]
 # Maximum ray distance in meters
 max_distance = 500.0

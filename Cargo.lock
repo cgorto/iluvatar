@@ -3354,6 +3354,7 @@ dependencies = [
  "glam",
  "iluvatar-camera",
  "iluvatar-core",
+ "iluvatar-server",
  "serde",
  "thiserror 2.0.17",
  "toml",

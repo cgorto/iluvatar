@@ -9,7 +9,7 @@ use iluvatar_camera::{
     network::NetworkClient,
     raymarch::Raymarcher,
 };
-use iluvatar_core::{BoundingBox, CameraFrame, CameraRegistration};
+use iluvatar_core::{BoundingBox, CameraFrame, CameraRegistration, GeoPosition};
 use std::path::Path;
 use std::time::Instant;
 use thiserror::Error;
@@ -91,11 +91,19 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     let grid_bounds = BoundingBox::new(Vec3::splat(-500.0), Vec3::splat(500.0));
     let voxel_size = 1.0;
 
+    let world_origin = if let Some(origin) = &config.processing.grid_origin {
+        GeoPosition::new(origin.latitude, origin.longitude, origin.altitude)
+    } else {
+        warn!("No grid origin configured, using (0,0,0) - likely incorrect!");
+        GeoPosition::new(0.0, 0.0, 0.0)
+    };
+
     let raymarcher = Raymarcher::new(
         config.to_intrinsics(),
         config.to_raymarch_config(),
         grid_bounds,
         voxel_size,
+        world_origin,
     );
 
     // Create frame buffer for backpressure
@@ -128,10 +136,10 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
         let pose = localizer.get_pose()?;
 
         // Capture frame
-        let grayscale = camera.capture_grayscale()?;
+        let grayscale = camera.capture_grayscale(&arena)?;
 
         // Compute difference mask
-        if let Some(mask) = processor.compute_difference(grayscale) {
+        if let Some(mask) = processor.compute_difference(&grayscale, &arena) {
             let motion_count = mask.motion_count();
 
             // Only raymarch and send if motion exceeds threshold

@@ -62,98 +62,20 @@ impl Default for FrameArena {
     }
 }
 
-/// A grayscale frame that borrows its data from an arena.
-pub struct ArenaGrayscaleFrame<'a> {
-    pub width: u32,
-    pub height: u32,
-    pub data: &'a mut [u8],
-}
-
-impl<'a> ArenaGrayscaleFrame<'a> {
-    /// Allocate a new grayscale frame from the arena.
-    pub fn new(arena: &'a FrameArena, width: u32, height: u32) -> Self {
-        let data = arena.alloc_slice((width * height) as usize);
-        Self {
-            width,
-            height,
-            data,
-        }
-    }
-
-    pub fn pixels(&self) -> &[u8] {
-        self.data
-    }
-
-    pub fn pixels_mut(&mut self) -> &mut [u8] {
-        self.data
-    }
-
-    pub fn get(&self, x: u32, y: u32) -> u8 {
-        self.data[(y * self.width + x) as usize]
-    }
-
-    pub fn set(&mut self, x: u32, y: u32, value: u8) {
-        self.data[(y * self.width + x) as usize] = value;
-    }
-}
-
-/// A difference mask that borrows its data from an arena.
-pub struct ArenaDifferenceMask<'a> {
-    pub width: u32,
-    pub height: u32,
-    pub data: &'a mut [u8],
-}
-
-impl<'a> ArenaDifferenceMask<'a> {
-    /// Allocate a new difference mask from the arena.
-    pub fn new(arena: &'a FrameArena, width: u32, height: u32) -> Self {
-        let data = arena.alloc_slice((width * height) as usize);
-        Self {
-            width,
-            height,
-            data,
-        }
-    }
-
-    pub fn set(&mut self, index: usize, value: u8) {
-        self.data[index] = value;
-    }
-
-    pub fn get(&self, x: u32, y: u32) -> u8 {
-        self.data[(y * self.width + x) as usize]
-    }
-
-    /// Iterate over pixels with motion (value > 0)
-    pub fn motion_pixels(&self) -> impl Iterator<Item = (u32, u32, u8)> + '_ {
-        self.data.iter().enumerate().filter_map(|(i, &value)| {
-            if value > 0 {
-                let x = (i as u32) % self.width;
-                let y = (i as u32) / self.width;
-                Some((x, y, value))
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Count of pixels with detected motion
-    pub fn motion_count(&self) -> usize {
-        self.data.iter().filter(|&&v| v > 0).count()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::GrayscaleFrame;
+    use crate::difference::DifferenceMask;
 
     #[test]
     fn test_arena_allocation() {
         let arena = FrameArena::with_capacity(1024 * 1024);
 
-        let frame = ArenaGrayscaleFrame::new(&arena, 640, 480);
+        let frame = GrayscaleFrame::new_in(&arena, 640, 480);
         assert_eq!(frame.data.len(), 640 * 480);
 
-        let mask = ArenaDifferenceMask::new(&arena, 640, 480);
+        let mask = DifferenceMask::new_in(&arena, 640, 480);
         assert_eq!(mask.data.len(), 640 * 480);
 
         // Both allocations should be from the same arena

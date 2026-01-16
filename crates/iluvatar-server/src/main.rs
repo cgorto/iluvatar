@@ -139,10 +139,8 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
 
         // Decay and detection cycle (tied together per design decision)
         if last_decay.elapsed() >= decay_interval {
-            // Apply decay to grid
-            // Note: SparseVoxelGrid::apply_decay takes &mut self, but we have Arc
-            // For now, we'll skip actual decay since grid uses interior mutability for add
-            // but needs &mut for decay. This is a design issue to fix.
+            // Apply decay to grid (removes low-intensity voxels)
+            grid.apply_decay();
 
             // Extract active points
             let points = grid.extract_points(&config.to_detection_config());

@@ -60,8 +60,12 @@ impl Default for DetectionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaymarchConfig {
+    /// Maximum distance to trace rays (in meters)
     pub max_distance: f32,
+    /// Step size for naive ray marching (deprecated: DDA algorithm doesn't use this)
+    #[serde(default)]
     pub step_size: f32,
+    /// Distance-based intensity attenuation
     pub attenuation: AttenuationConfig,
 }
 
@@ -69,7 +73,7 @@ impl Default for RaymarchConfig {
     fn default() -> Self {
         Self {
             max_distance: 500.0,
-            step_size: 0.5,
+            step_size: 0.5, // Kept for backwards compatibility, unused by DDA
             attenuation: AttenuationConfig::default(),
         }
     }

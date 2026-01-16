@@ -1,7 +1,14 @@
 use bevy::prelude::*;
-use iluvatar_core::CameraFrame;
+use iluvatar_core::{CameraFrame, DetectionConfig, GeoPosition};
+use iluvatar_server::{
+    detector::{ObjectDetector, ObjectIdGenerator},
+    grid::SparseVoxelGrid,
+    tracker::ObjectTracker,
+};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::capture::CaptureConfig;
+use crate::capture::{CaptureConfig, SimulatorOrigin};
 use crate::targets::SimulatedTarget;
 
 pub struct ValidationPlugin;
@@ -9,7 +16,121 @@ pub struct ValidationPlugin;
 impl Plugin for ValidationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ValidationMetrics>()
-            .add_systems(Update, (collect_ground_truth, log_validation_metrics));
+            .add_systems(Startup, setup_tracker_simulation)
+            .add_systems(
+                Update,
+                (
+                    collect_ground_truth,
+                    update_tracker_simulation,
+                    log_validation_metrics,
+                ),
+            );
+    }
+}
+
+/// Resource that runs a local instance of the server's tracking pipeline
+#[derive(Resource)]
+pub struct TrackerSimulation {
+    pub grid: Arc<SparseVoxelGrid>,
+    pub detector: ObjectDetector,
+    pub tracker: ObjectTracker,
+    pub last_update: f64,
+    pub detected_tracks: Vec<TrackedObjectInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackedObjectInfo {
+    pub id: u64,
+    pub position: Vec3,
+    pub velocity: Vec3,
+}
+
+fn setup_tracker_simulation(mut commands: Commands, origin: Res<SimulatorOrigin>) {
+    // Default configuration for the simulated tracker
+    let grid_origin = GeoPosition::new(
+        origin.geo_position.latitude,
+        origin.geo_position.longitude,
+        origin.geo_position.altitude,
+    );
+    let voxel_size = 1.0;
+
+    // Create grid with 500m radius (1000m dim)
+    let grid = Arc::new(SparseVoxelGrid::new(
+        grid_origin,
+        glam::UVec3::new(1000, 1000, 200),
+        voxel_size,
+        0.5, // Decay rate
+    ));
+
+    let id_generator = Arc::new(ObjectIdGenerator::new());
+
+    let detection_config = DetectionConfig {
+        intensity_threshold: 5.0, // Lower threshold for simulation
+        min_contributors: 1,      // Allow single camera detection for simple tests
+        cluster_epsilon: 5.0,
+        cluster_min_points: 2,
+    };
+
+    let detector = ObjectDetector::new(detection_config, id_generator.clone());
+
+    let tracker = ObjectTracker::new(
+        id_generator,
+        15.0, // Association threshold
+        60,   // Max missing frames (generous for sim)
+        60.0, // Frame rate
+    );
+
+    commands.insert_resource(TrackerSimulation {
+        grid,
+        detector,
+        tracker,
+        last_update: 0.0,
+        detected_tracks: Vec::new(),
+    });
+}
+
+fn update_tracker_simulation(
+    time: Res<Time>,
+    mut tracker_sim: ResMut<TrackerSimulation>,
+    capture_config: Res<CaptureConfig>,
+) {
+    let now = time.elapsed_secs_f64();
+
+    // Run detection/tracking at 10Hz
+    if now - tracker_sim.last_update >= 0.1 {
+        // 1. Decay
+        tracker_sim.grid.apply_decay();
+
+        // 2. Detect
+        let detection_config = DetectionConfig {
+            intensity_threshold: 5.0,
+            min_contributors: 1,
+            cluster_epsilon: 5.0,
+            cluster_min_points: 2,
+        };
+        let points = tracker_sim.grid.extract_points(&detection_config);
+        let detections = tracker_sim.detector.detect(&points);
+
+        // 3. Track
+        let tracks = tracker_sim.tracker.update(detections);
+
+        // 4. Convert tracks back to Bevy coordinates for validation
+        tracker_sim.detected_tracks = tracks
+            .into_iter()
+            .map(|t| {
+                // t.centroid is in local grid coordinates (offset from grid min)
+                // ENU = grid_min + centroid
+                let enu = capture_config.grid_bounds.min + t.centroid;
+
+                TrackedObjectInfo {
+                    id: t.id,
+                    position: Vec3::new(enu.x, enu.z, enu.y),
+                    velocity: Vec3::ZERO,
+                }
+            })
+            .collect();
+
+        tracker_sim.last_update = now;
     }
 }
 
@@ -152,6 +273,7 @@ pub fn collect_ground_truth(
 fn log_validation_metrics(
     time: Res<Time>,
     metrics: Res<ValidationMetrics>,
+    tracker_sim: Option<Res<TrackerSimulation>>,
     mut last_log: Local<f64>,
 ) {
     let now = time.elapsed_secs_f64();
@@ -160,11 +282,17 @@ fn log_validation_metrics(
     if now - *last_log >= 5.0 {
         *last_log = now;
 
+        let tracker_count = tracker_sim
+            .as_ref()
+            .map(|t| t.detected_tracks.len())
+            .unwrap_or(0);
+
         tracing::info!(
-            "Validation Stats | Detections: {} | False Positives: {} | Mean Error: {:.2}m",
+            "Validation Stats | Detections: {} | False Positives: {} | Mean Error: {:.2}m | Active Tracks: {}",
             metrics.total_detections,
             metrics.false_positives,
-            metrics.mean_error().unwrap_or(0.0)
+            metrics.mean_error().unwrap_or(0.0),
+            tracker_count
         );
 
         // Log current ground truth positions
