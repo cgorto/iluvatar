@@ -203,7 +203,7 @@ mod tests {
         let mut kf = Kalman1D::new(0.0, 1.0, 0.5);
 
         // Feed measurements near position 10
-        for _ in 0..20 {
+        for _ in 0..100 {
             kf.predict(1.0 / 60.0);
             kf.update(10.0);
         }

@@ -6,7 +6,6 @@ use iluvatar_server::{
     tracker::ObjectTracker,
 };
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::capture::{CaptureConfig, SimulatorOrigin};
 use crate::targets::SimulatedTarget;
@@ -151,24 +150,51 @@ pub struct ValidationMetrics {
     pub false_positives: u32,
     pub false_negatives: u32,
     pub total_detections: u32,
+    pub id_switches: u32,
+    /// Maps tracker_id -> ground_truth_id for consistency checking
+    pub id_mappings: std::collections::HashMap<u64, u32>,
 }
 
 impl ValidationMetrics {
-    /// Record a detection and compare to ground truth
-    pub fn record_detection(&mut self, detected_pos: Vec3, timestamp: f64) -> Option<f32> {
-        // Find closest ground truth at this timestamp
-        let closest = self
-            .ground_truth
-            .iter()
-            .filter(|gt| (gt.timestamp - timestamp).abs() < 0.1)
-            .min_by(|a, b| {
-                let dist_a = a.position.distance(detected_pos);
-                let dist_b = b.position.distance(detected_pos);
-                dist_a.partial_cmp(&dist_b).unwrap()
-            });
+    /// Record a detection with tracker ID and compare to ground truth
+    ///
+    /// This version tracks ID consistency - use for tracker output validation
+    pub fn record_detection(
+        &mut self,
+        tracker_id: u64,
+        detected_pos: Vec3,
+        timestamp: f64,
+    ) -> Option<f32> {
+        if let Some((error, gt_id)) = self.find_closest_ground_truth(detected_pos, timestamp) {
+            self.detection_errors.push(error);
+            self.total_detections += 1;
 
-        if let Some(gt) = closest {
-            let error = gt.position.distance(detected_pos);
+            // Check for ID consistency
+            if let Some(previous_gt_id) = self.id_mappings.get(&tracker_id) {
+                if *previous_gt_id != gt_id {
+                    self.id_switches += 1;
+                    tracing::warn!(
+                        "ID Switch! Tracker {} switched from GT {} to GT {}",
+                        tracker_id,
+                        previous_gt_id,
+                        gt_id
+                    );
+                }
+            }
+            self.id_mappings.insert(tracker_id, gt_id);
+
+            Some(error)
+        } else {
+            self.false_positives += 1;
+            None
+        }
+    }
+
+    /// Record a raw detection (no tracker ID) and compare to ground truth
+    ///
+    /// Use this for frame-level validation before tracker assignment
+    pub fn record_raw_detection(&mut self, detected_pos: Vec3, timestamp: f64) -> Option<f32> {
+        if let Some((error, _gt_id)) = self.find_closest_ground_truth(detected_pos, timestamp) {
             self.detection_errors.push(error);
             self.total_detections += 1;
             Some(error)
@@ -176,6 +202,21 @@ impl ValidationMetrics {
             self.false_positives += 1;
             None
         }
+    }
+
+    /// Find closest ground truth sample to a detected position
+    fn find_closest_ground_truth(&self, detected_pos: Vec3, timestamp: f64) -> Option<(f32, u32)> {
+        self.ground_truth
+            .iter()
+            .filter(|gt| (gt.timestamp - timestamp).abs() < 0.1)
+            .min_by(|a, b| {
+                let dist_a = a.position.distance(detected_pos);
+                let dist_b = b.position.distance(detected_pos);
+                dist_a
+                    .partial_cmp(&dist_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|gt| (gt.position.distance(detected_pos), gt.target_id))
     }
 
     /// Calculate mean detection error
@@ -233,8 +274,8 @@ impl ValidationMetrics {
             if total_weight > 0.0 {
                 centroid /= total_weight;
 
-                // Record this as a detection
-                if let Some(error) = self.record_detection(centroid, timestamp_secs) {
+                // Record this as a raw detection (no tracker ID yet)
+                if let Some(error) = self.record_raw_detection(centroid, timestamp_secs) {
                     tracing::debug!(
                         "Detection at {:?}, error: {:.2}m ({} contributions)",
                         centroid,

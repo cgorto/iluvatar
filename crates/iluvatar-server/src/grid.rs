@@ -310,4 +310,68 @@ mod tests {
         // Voxel should still exist (high intensity survives low decay)
         assert_eq!(grid.active_count(), 1);
     }
+
+    #[test]
+    fn test_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let grid = Arc::new(SparseVoxelGrid::new(
+            GeoPosition::new(0.0, 0.0, 0.0),
+            UVec3::new(1000, 1000, 1000),
+            1.0,
+            0.5,
+        ));
+
+        let mut handles = vec![];
+
+        // Writers
+        for i in 0..10 {
+            let grid = grid.clone();
+            handles.push(thread::spawn(move || {
+                for j in 0..100 {
+                    let contrib = vec![VoxelContribution {
+                        index: UVec3::new(j % 100, i, 0),
+                        intensity: 1.0,
+                    }];
+                    grid.add_camera_contributions(i as u64, &contrib);
+                    std::thread::yield_now();
+                }
+            }));
+        }
+
+        // Decayer
+        let grid_decay = grid.clone();
+        handles.push(thread::spawn(move || {
+            for _ in 0..10 {
+                grid_decay.apply_decay();
+                std::thread::yield_now();
+            }
+        }));
+
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_pack_unpack_fuzz(
+            x in 0u32..0x200000,
+            y in 0u32..0x200000,
+            z in 0u32..0x200000
+        ) {
+            let packed = SparseVoxelGrid::pack_index(x, y, z);
+            let unpacked = SparseVoxelGrid::unpack_index(packed);
+            assert_eq!(unpacked.x, x);
+            assert_eq!(unpacked.y, y);
+            assert_eq!(unpacked.z, z);
+        }
+    }
 }

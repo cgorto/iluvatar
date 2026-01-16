@@ -1,6 +1,5 @@
 use iluvatar_core::{CameraFrame, TrackedObject};
 use iluvatar_server::{
-    aggregator::FrameAggregator,
     camera_mgmt::CameraRegistry,
     config::{ConfigError, ServerConfig},
     detector::{ObjectDetector, ObjectIdGenerator},
@@ -89,7 +88,6 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
         config.tracking.max_missing_frames,
         config.server.broadcast_rate_hz, // Use broadcast rate as effective frame rate
     );
-    let mut aggregator = FrameAggregator::new(Duration::from_millis(100), 10);
 
     // Timing
     let decay_interval = config.decay_interval();
@@ -126,9 +124,6 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
 
                 // Add contributions to grid
                 grid.add_frame(&frame);
-
-                // Add to aggregator
-                aggregator.add_frame(frame);
 
                 frames_received += 1;
             }

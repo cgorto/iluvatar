@@ -24,7 +24,7 @@ quinn = { workspace = true }
 rustls = { workspace = true }
 
 # Camera capture
-# v4l = "0.14"  # Uncomment for Linux video capture
+v4l = "0.14"  # Uncomment for Linux video capture
 
 # Image processing
 image = "0.25"
@@ -34,3 +34,6 @@ toml = "0.8"
 
 # Memory management
 bumpalo = { workspace = true }
+
+# Self-referential struct support
+ouroboros = "0.18"

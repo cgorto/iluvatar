@@ -76,6 +76,11 @@ impl CameraRegistry {
 
     /// Register a new camera
     pub fn register(&mut self, registration: CameraRegistration) -> bool {
+        // Verify protocol version
+        if registration.version != iluvatar_core::PROTOCOL_VERSION {
+            return false;
+        }
+
         if self.cameras.contains_key(&registration.camera_id) {
             return false;
         }

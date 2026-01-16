@@ -79,6 +79,7 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
 
     // Register with server
     let registration = CameraRegistration {
+        version: iluvatar_core::PROTOCOL_VERSION,
         camera_id: config.identity.camera_id,
         intrinsics: config.to_intrinsics(),
         initial_pose,
@@ -202,9 +203,34 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
 }
 
 fn create_camera(config: &CameraConfig) -> Box<dyn CameraCapture> {
-    // TODO: Use V4L2Camera when device is a real path
-    // For now, always use dummy camera
     let (width, height) = config.resolution();
+    let device = &config.hardware.device;
+
+    if device.starts_with("/dev/video") {
+        #[cfg(target_os = "linux")]
+        {
+            match iluvatar_camera::capture::V4L2Camera::new(device, width, height) {
+                Ok(cam) => {
+                    info!(
+                        "Initialized V4L2 camera at {} ({}x{})",
+                        device, width, height
+                    );
+                    return Box::new(cam);
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to initialize V4L2 camera: {}. Falling back to dummy.",
+                        e
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        warn!("V4L2 not supported on this platform. Using dummy camera.");
+    } else {
+        info!("Using dummy camera as requested (device: {})", device);
+    }
+
     Box::new(DummyCamera::new(width, height))
 }
 

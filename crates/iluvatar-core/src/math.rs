@@ -1,7 +1,14 @@
 use glam::Vec3;
 
-/// Epsilon for safe division to handle parallel rays
-pub const EPSILON: f32 = 1e-12;
+/// Epsilon for safe division to handle parallel rays.
+///
+/// For f32, machine epsilon is ~1.19e-7. We use 1e-6 as a practical threshold
+/// for "effectively zero" denominators, which is about 8x machine epsilon.
+/// This catches values that are numerically unstable without being overly aggressive.
+///
+/// Note: The previous value of 1e-12 was below f32's precision (~7 decimal digits)
+/// and would only catch exact zeros or denormals.
+pub const EPSILON: f32 = 1e-6;
 
 /// Safe division that returns infinity for near-zero denominators
 /// Prevents NaN and handles edge cases with parallel rays

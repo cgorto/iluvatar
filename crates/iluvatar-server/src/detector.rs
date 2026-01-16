@@ -64,7 +64,11 @@ impl SpatialIndex {
         for dx in -cell_radius..=cell_radius {
             for dy in -cell_radius..=cell_radius {
                 for dz in -cell_radius..=cell_radius {
-                    let cell = (center_cell.0 + dx, center_cell.1 + dy, center_cell.2 + dz);
+                    let cell = (
+                        center_cell.0.wrapping_add(dx),
+                        center_cell.1.wrapping_add(dy),
+                        center_cell.2.wrapping_add(dz),
+                    );
 
                     if let Some(indices) = self.cells.get(&cell) {
                         for &idx in indices {
@@ -236,5 +240,46 @@ mod tests {
 
         let objects = detector.detect(&points);
         assert_eq!(objects.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_dbscan_no_panic(
+            // Generate random positions. Limit range to avoid potential float issues if that's not the goal,
+            // but let's try fairly wide range first.
+            positions in prop::collection::vec(
+                (any::<f32>(), any::<f32>(), any::<f32>()),
+                0..50 // Limit number of points for performance
+            )
+        ) {
+            let points: Vec<DetectedPoint> = positions
+                .into_iter()
+                .map(|(x, y, z)| DetectedPoint {
+                    position: Vec3::new(x, y, z),
+                    intensity: 1.0,
+                    confidence: 1.0,
+                })
+                .collect();
+
+            let id_gen = Arc::new(ObjectIdGenerator::new());
+            let mut detector = ObjectDetector::new(
+                DetectionConfig {
+                    intensity_threshold: 0.5,
+                    min_contributors: 1,
+                    cluster_epsilon: 1.0,
+                    cluster_min_points: 2,
+                },
+                id_gen,
+            );
+
+            // Should not panic
+            let _ = detector.detect(&points);
+        }
     }
 }

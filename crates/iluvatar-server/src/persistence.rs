@@ -1,13 +1,15 @@
 use iluvatar_core::TrackedObject;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// A snapshot of the world state at a point in time
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldSnapshot {
     pub timestamp: u64,
     pub objects: Vec<TrackedObject>,
+    #[serde(skip, default = "Instant::now")]
     pub captured_at: Instant,
 }
 
@@ -87,16 +89,65 @@ impl PersistenceLayer {
 
     /// Write snapshots to disk (placeholder)
     fn write_to_disk(&self) {
-        // TODO: Implement actual disk persistence
-        // Could use:
-        // - SQLite for structured data
-        // - Memory-mapped files for fast access
-        // - Compressed binary format for space efficiency
+        let Some(path) = &self.path else { return };
+
+        if let Err(e) = std::fs::create_dir_all(path) {
+            tracing::error!("Failed to create persistence directory: {}", e);
+            return;
+        }
+
+        for snapshot in &self.snapshots {
+            let filename = format!("snapshot_{}.bin", snapshot.timestamp);
+            let file_path = path.join(filename);
+
+            // Skip if already exists to avoid unnecessary writes
+            if file_path.exists() {
+                continue;
+            }
+
+            match postcard::to_allocvec(snapshot) {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(&file_path, bytes) {
+                        tracing::error!("Failed to write snapshot {}: {}", snapshot.timestamp, e);
+                    }
+                }
+                Err(e) => tracing::error!("Serialization failed: {}", e),
+            }
+        }
     }
 
     /// Load snapshots from disk (placeholder)
     pub fn load_from_disk(&mut self) {
-        // TODO: Implement disk loading
+        let Some(path) = &self.path else { return };
+        if !path.exists() {
+            return;
+        }
+
+        let Ok(entries) = std::fs::read_dir(path) else {
+            tracing::error!("Failed to read persistence directory");
+            return;
+        };
+
+        let mut loaded = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |e| e == "bin") {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if let Ok(snapshot) = postcard::from_bytes::<WorldSnapshot>(&bytes) {
+                        loaded.push(snapshot);
+                    }
+                }
+            }
+        }
+
+        // Sort by timestamp and populate buffer
+        loaded.sort_by_key(|s| s.timestamp);
+        self.snapshots = VecDeque::from(loaded);
+        self.cleanup_old();
+
+        if !self.snapshots.is_empty() {
+            tracing::info!("Loaded {} snapshots from disk", self.snapshots.len());
+        }
     }
 }
 

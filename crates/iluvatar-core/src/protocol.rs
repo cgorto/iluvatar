@@ -16,6 +16,7 @@ pub struct CameraFrame {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraRegistration {
+    pub version: u8,
     pub camera_id: CameraId,
     pub intrinsics: CameraIntrinsics,
     pub initial_pose: CameraPose,

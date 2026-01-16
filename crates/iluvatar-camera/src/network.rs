@@ -68,7 +68,11 @@ impl NetworkClient {
     }
 
     /// Send camera registration
-    pub async fn register(&mut self, registration: CameraRegistration) -> Result<(), NetworkError> {
+    pub async fn register(
+        &mut self,
+        mut registration: CameraRegistration,
+    ) -> Result<(), NetworkError> {
+        registration.version = protocol::PROTOCOL_VERSION;
         let msg = CameraMessage::Register(registration);
         self.send_message(&msg).await
     }
