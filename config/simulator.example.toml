@@ -1,0 +1,49 @@
+# Iluvatar Simulator Configuration
+
+[window]
+# Window title
+title = "Iluvatar Simulator"
+# Window resolution
+width = 1280
+height = 720
+# Fullscreen mode
+fullscreen = false
+
+[scene]
+# Ground plane size in meters
+ground_size = 1000.0
+# Ambient light brightness
+ambient_brightness = 200.0
+
+[cameras]
+# Number of simulated cameras
+count = 5
+# Camera positions (if not specified, uses default layout)
+# positions = [
+#   { x = -100.0, y = 30.0, z = -100.0 },
+#   { x = 100.0, y = 30.0, z = -100.0 },
+#   { x = -100.0, y = 30.0, z = 100.0 },
+#   { x = 100.0, y = 30.0, z = 100.0 },
+#   { x = 0.0, y = 50.0, z = 0.0 },
+# ]
+# Camera field of view (degrees)
+fov_horizontal = 90.0
+fov_vertical = 52.0
+
+[targets]
+# Number of initial targets
+count = 3
+# Motion patterns to use
+patterns = ["linear", "circular", "random"]
+
+[validation]
+# Enable ground truth collection
+enabled = true
+# How long to retain ground truth samples (seconds)
+retention_seconds = 10.0
+
+[output]
+# Send data to a real Iluvatar server
+send_to_server = false
+# Server address (if sending)
+server_address = "localhost:4433"

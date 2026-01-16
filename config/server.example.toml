@@ -1,0 +1,41 @@
+# Iluvatar Server Configuration
+
+[server]
+# QUIC listen address for cameras
+listen_address = "0.0.0.0:4433"
+# WebSocket port for web clients
+websocket_port = 8080
+# Update broadcast rate to clients (Hz)
+broadcast_rate_hz = 10.0
+
+[grid]
+# Voxel size in meters
+voxel_size = 1.0
+# Grid origin (required - center of monitored area)
+origin = { latitude = 47.6062, longitude = -122.3321, altitude = 0.0 }
+# Grid dimensions in voxels [x, y, z]
+dimensions = [1000, 1000, 100]
+
+[decay]
+# Voxel intensity decay rate per second
+# Higher = faster decay, lower = more persistence
+# 0.5 gives ~1.4 second half-life
+rate = 0.5
+# Decay update interval in seconds (also triggers detection)
+update_interval = 0.1
+
+[detection]
+# Minimum voxel intensity to consider active
+intensity_threshold = 10.0
+# Minimum number of cameras contributing to trust a detection
+min_contributors = 2
+# DBSCAN clustering epsilon (meters) - max distance between points in cluster
+cluster_epsilon = 5.0
+# Minimum points to form a cluster
+cluster_min_points = 3
+
+[tracking]
+# Maximum distance to associate detection with existing track (meters)
+association_threshold = 10.0
+# Frames before dropping unmatched track
+max_missing_frames = 30

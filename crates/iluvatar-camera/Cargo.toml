@@ -1,0 +1,36 @@
+[package]
+name = "iluvatar-camera"
+description = "Camera unit implementation for Iluvatar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "iluvatar-camera"
+path = "src/main.rs"
+
+[dependencies]
+iluvatar-core = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+smol = { workspace = true }
+async-channel = { workspace = true }
+futures-lite = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+
+# Camera capture
+# v4l = "0.14"  # Uncomment for Linux video capture
+
+# Image processing
+image = "0.25"
+
+# Configuration
+toml = "0.8"
+
+# Memory management
+bumpalo = { workspace = true }

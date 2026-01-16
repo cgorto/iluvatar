@@ -1,0 +1,40 @@
+# Iluvatar Camera Configuration
+
+[identity]
+# Unique identifier for this camera
+camera_id = 1
+
+[hardware]
+# Video device path (Linux V4L2)
+device = "/dev/video0"
+# Capture resolution
+width = 1920
+height = 1080
+# Target frame rate
+fps = 60
+
+[localization]
+# GPS device path
+gps_device = "/dev/ttyUSB0"
+# Timeout waiting for initial GPS fix (seconds)
+gps_timeout_secs = 60
+
+[processing]
+# Difference threshold (0-255) for motion detection
+difference_threshold = 25
+# Minimum percentage of frame with motion before transmitting (0.0-100.0)
+motion_threshold_percent = 0.1
+
+[processing.raymarch]
+# Maximum ray distance in meters
+max_distance = 500.0
+# Ray step size in meters
+step_size = 0.5
+
+[network]
+# Server address (host:port)
+server_address = "localhost:4433"
+# Connection timeout in seconds (how long to retry before giving up)
+connection_timeout_secs = 30
+# Frame buffer size (number of frames to buffer before dropping oldest)
+frame_buffer_size = 4
