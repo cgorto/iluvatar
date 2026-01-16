@@ -60,7 +60,11 @@ pub struct ProcessingConfig {
     pub motion_threshold_percent: f32,
     #[serde(default)]
     pub raymarch: RaymarchSettings,
-    pub grid_origin: Option<GeoOrigin>,
+    /// Geographic origin for the voxel grid coordinate system.
+    ///
+    /// This field is required. All camera positions and voxel coordinates are computed
+    /// relative to this origin. Typically set to the center of the monitored area.
+    pub grid_origin: GeoOrigin,
 }
 
 fn default_difference_threshold() -> u8 {

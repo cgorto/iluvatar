@@ -71,7 +71,14 @@ impl Localizer for DummyLocalizer {
     }
 }
 
-/// GPS + IMU fusion localizer (placeholder for real implementation)
+/// GPS + IMU fusion localizer.
+///
+/// **Not yet implemented.** This struct exists as a placeholder for future hardware
+/// integration. Currently, `get_pose()` always returns `LocalizationError::GpsUnavailable`.
+///
+/// For actual deployments, use `DummyLocalizer` with a fixed position configured via
+/// the `grid_origin` field in `ProcessingConfig`.
+#[allow(dead_code)]
 pub struct GpsImuLocalizer {
     last_gps_time: Option<std::time::Instant>,
     last_pose: Option<CameraPose>,

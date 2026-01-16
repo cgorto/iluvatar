@@ -92,12 +92,8 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     let grid_bounds = BoundingBox::new(Vec3::splat(-500.0), Vec3::splat(500.0));
     let voxel_size = 1.0;
 
-    let world_origin = if let Some(origin) = &config.processing.grid_origin {
-        GeoPosition::new(origin.latitude, origin.longitude, origin.altitude)
-    } else {
-        warn!("No grid origin configured, using (0,0,0) - likely incorrect!");
-        GeoPosition::new(0.0, 0.0, 0.0)
-    };
+    let origin = &config.processing.grid_origin;
+    let world_origin = GeoPosition::new(origin.latitude, origin.longitude, origin.altitude);
 
     let raymarcher = Raymarcher::new(
         config.to_intrinsics(),
@@ -236,9 +232,13 @@ fn create_camera(config: &CameraConfig) -> Box<dyn CameraCapture> {
 
 fn create_localizer(config: &CameraConfig) -> Box<dyn Localizer> {
     // TODO: Use GpsImuLocalizer when GPS device is available
-    // For now, use dummy localizer at origin
-    let _ = config; // suppress unused warning
-    Box::new(DummyLocalizer::with_position(47.6062, -122.3321, 0.0))
+    // For now, use dummy localizer at configured grid_origin
+    let origin = &config.processing.grid_origin;
+    Box::new(DummyLocalizer::with_position(
+        origin.latitude,
+        origin.longitude,
+        origin.altitude,
+    ))
 }
 
 async fn wait_for_gps(

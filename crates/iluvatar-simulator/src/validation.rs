@@ -1,20 +1,41 @@
 use bevy::prelude::*;
 use iluvatar_core::{CameraFrame, DetectionConfig, GeoPosition};
-use iluvatar_server::{
-    detector::{ObjectDetector, ObjectIdGenerator},
-    grid::SparseVoxelGrid,
-    tracker::ObjectTracker,
-};
+use iluvatar_server::{detector::ObjectDetector, grid::SparseVoxelGrid, tracker::ObjectTracker};
 use std::sync::Arc;
 
 use crate::capture::{CaptureConfig, SimulatorOrigin};
 use crate::targets::SimulatedTarget;
+
+/// Configuration for voxel grid visualization
+#[derive(Resource)]
+pub struct VoxelVisualizationConfig {
+    /// Minimum intensity threshold for drawing voxels (skip dim ones for performance)
+    pub intensity_threshold: f32,
+    /// Maximum number of voxels to draw per frame (performance limit)
+    pub max_voxels: usize,
+    /// Size of each voxel cube (slightly smaller than actual voxel for visibility)
+    pub cube_size: f32,
+    /// Enable/disable visualization
+    pub enabled: bool,
+}
+
+impl Default for VoxelVisualizationConfig {
+    fn default() -> Self {
+        Self {
+            intensity_threshold: 0.5,
+            max_voxels: 5000,
+            cube_size: 0.8,
+            enabled: true,
+        }
+    }
+}
 
 pub struct ValidationPlugin;
 
 impl Plugin for ValidationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ValidationMetrics>()
+            .init_resource::<VoxelVisualizationConfig>()
             .add_systems(Startup, setup_tracker_simulation)
             .add_systems(
                 Update,
@@ -22,6 +43,8 @@ impl Plugin for ValidationPlugin {
                     collect_ground_truth,
                     update_tracker_simulation,
                     log_validation_metrics,
+                    draw_debug_visualization,
+                    draw_voxel_grid_heatmap,
                 ),
             );
     }
@@ -61,8 +84,6 @@ fn setup_tracker_simulation(mut commands: Commands, origin: Res<SimulatorOrigin>
         0.5, // Decay rate
     ));
 
-    let id_generator = Arc::new(ObjectIdGenerator::new());
-
     let detection_config = DetectionConfig {
         intensity_threshold: 5.0, // Lower threshold for simulation
         min_contributors: 1,      // Allow single camera detection for simple tests
@@ -70,10 +91,10 @@ fn setup_tracker_simulation(mut commands: Commands, origin: Res<SimulatorOrigin>
         cluster_min_points: 2,
     };
 
-    let detector = ObjectDetector::new(detection_config, id_generator.clone());
+    // Detector produces anonymous detections (id=0), tracker assigns identity
+    let detector = ObjectDetector::new(detection_config);
 
     let tracker = ObjectTracker::new(
-        id_generator,
         15.0, // Association threshold
         60,   // Max missing frames (generous for sim)
         60.0, // Frame rate
@@ -117,9 +138,9 @@ fn update_tracker_simulation(
         tracker_sim.detected_tracks = tracks
             .into_iter()
             .map(|t| {
-                // t.centroid is in local grid coordinates (offset from grid min)
-                // ENU = grid_min + centroid
-                let enu = capture_config.grid_bounds.min + t.centroid;
+                // t.centroid is in voxel grid coordinates (offset from grid min in voxels)
+                // ENU = grid_min + centroid * voxel_size
+                let enu = capture_config.grid_bounds.min + t.centroid * capture_config.voxel_size;
 
                 TrackedObjectInfo {
                     id: t.id,
@@ -348,4 +369,166 @@ fn log_validation_metrics(
             tracing::debug!("Active targets: {:?}", unique_targets);
         }
     }
+}
+
+/// Draw debug visualization using gizmos
+///
+/// - Detected tracks: Red spheres with yellow velocity vectors
+/// - Ground truth targets: Green wireframe spheres
+fn draw_debug_visualization(
+    mut gizmos: Gizmos,
+    tracker_sim: Option<Res<TrackerSimulation>>,
+    targets: Query<(&Transform, &SimulatedTarget)>,
+) {
+    // Draw ground truth targets (green wireframe spheres)
+    for (transform, target) in targets.iter() {
+        let pos = transform.translation;
+
+        // Green sphere for ground truth
+        gizmos.sphere(
+            Isometry3d::from_translation(pos),
+            3.0,
+            Color::srgb(0.2, 1.0, 0.2), // Bright green
+        );
+
+        // Draw ground truth velocity vector (cyan)
+        if target.velocity.length_squared() > 0.01 {
+            let velocity_end = pos + target.velocity.normalize() * 5.0;
+            gizmos.arrow(pos, velocity_end, Color::srgb(0.2, 1.0, 1.0));
+        }
+
+        // Label with ground truth ID (small cross marker)
+        let label_offset = Vec3::Y * 4.0;
+        gizmos.cross(
+            Isometry3d::from_translation(pos + label_offset),
+            1.0,
+            Color::srgb(0.2, 1.0, 0.2),
+        );
+    }
+
+    // Draw detected tracks from the tracker simulation
+    if let Some(tracker) = tracker_sim {
+        for track in &tracker.detected_tracks {
+            let pos = track.position;
+
+            // Red sphere for detected objects
+            gizmos.sphere(
+                Isometry3d::from_translation(pos),
+                2.5,
+                Color::srgb(1.0, 0.2, 0.2), // Bright red
+            );
+
+            // Yellow velocity vector
+            if track.velocity.length_squared() > 0.01 {
+                let velocity_end = pos + track.velocity.normalize() * 4.0;
+                gizmos.arrow(pos, velocity_end, Color::srgb(1.0, 1.0, 0.2));
+            }
+
+            // Draw track ID indicator (orange cross above the sphere)
+            let id_offset = Vec3::Y * 5.0;
+            gizmos.cross(
+                Isometry3d::from_translation(pos + id_offset),
+                0.8,
+                Color::srgb(1.0, 0.6, 0.0), // Orange
+            );
+        }
+    }
+}
+
+/// Draw voxel grid heatmap visualization using gizmos
+///
+/// Visualizes active voxels in the sparse voxel grid as colored cubes:
+/// - Low intensity: Blue
+/// - Medium intensity: Yellow  
+/// - High intensity: Red
+///
+/// The grid is in ENU coordinates, which must be converted to Bevy's Y-up system.
+fn draw_voxel_grid_heatmap(
+    mut gizmos: Gizmos,
+    tracker_sim: Option<Res<TrackerSimulation>>,
+    config: Res<VoxelVisualizationConfig>,
+    capture_config: Res<CaptureConfig>,
+) {
+    if !config.enabled {
+        return;
+    }
+
+    let Some(tracker) = tracker_sim else {
+        return;
+    };
+
+    // Get max intensity for normalization (with a minimum to avoid division by zero)
+    let max_intensity = tracker.grid.max_intensity().max(1.0);
+
+    // Iterate over active voxels
+    let voxels = tracker
+        .grid
+        .iter_voxels_for_visualization(config.intensity_threshold, config.max_voxels);
+
+    for (grid_pos, intensity, camera_count) in voxels {
+        // grid_pos is in grid-local coordinates (meters from grid origin at 0,0,0)
+        // The grid origin corresponds to (0,0,0) in the grid, but the actual ENU
+        // position needs to account for grid_bounds.min offset
+        //
+        // grid_pos already contains the world position from voxel_to_world(),
+        // but it's relative to the grid's (0,0,0). We need to offset by grid_bounds.min
+        // to get the ENU position, then convert to Bevy coordinates.
+        //
+        // ENU (East, North, Up) -> Bevy (X-right, Y-up, Z-forward)
+        // ENU.x (East)  -> Bevy.x
+        // ENU.y (North) -> Bevy.z
+        // ENU.z (Up)    -> Bevy.y
+
+        // The grid's voxel_to_world returns position in grid space (0,0,0 at grid origin)
+        // We need to offset by the capture config's grid_bounds.min to get ENU coordinates
+        let enu_pos = capture_config.grid_bounds.min + grid_pos;
+        let bevy_pos = Vec3::new(enu_pos.x, enu_pos.z, enu_pos.y);
+
+        // Compute normalized intensity (0.0 to 1.0)
+        let t = (intensity / max_intensity).clamp(0.0, 1.0);
+
+        // Heatmap color: blue (cold) -> yellow -> red (hot)
+        let color = heatmap_color(t, camera_count);
+
+        // Draw a small cuboid at the voxel position
+        gizmos.cube(
+            Transform::from_translation(bevy_pos).with_scale(Vec3::splat(config.cube_size)),
+            color,
+        );
+    }
+}
+
+/// Convert normalized intensity (0.0-1.0) to a heatmap color.
+/// Also considers camera_count for additional visual distinction.
+///
+/// Color scheme:
+/// - t=0.0: Blue (cold/dim)
+/// - t=0.5: Yellow (medium)  
+/// - t=1.0: Red (hot/bright)
+/// - Multiple cameras: Brighter/more saturated
+fn heatmap_color(t: f32, camera_count: u8) -> Color {
+    // Base heatmap interpolation
+    let (r, g, b) = if t < 0.5 {
+        // Blue to Yellow (0.0 -> 0.5)
+        let t2 = t * 2.0;
+        (
+            t2,       // 0 -> 1
+            t2,       // 0 -> 1
+            1.0 - t2, // 1 -> 0
+        )
+    } else {
+        // Yellow to Red (0.5 -> 1.0)
+        let t2 = (t - 0.5) * 2.0;
+        (
+            1.0,      // stays 1
+            1.0 - t2, // 1 -> 0
+            0.0,      // stays 0
+        )
+    };
+
+    // Boost brightness/alpha based on camera count (multi-camera corroboration)
+    // More cameras = more visible/brighter
+    let alpha = 0.4 + (camera_count as f32 / 5.0).min(0.6);
+
+    Color::srgba(r, g, b, alpha)
 }

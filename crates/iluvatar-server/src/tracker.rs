@@ -1,10 +1,26 @@
 use glam::Vec3;
 use iluvatar_core::{ObjectId, TrackedObject};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::detector::ObjectIdGenerator;
 use crate::kalman::Kalman3D;
+
+/// ID generator for tracked objects (owned by tracker)
+struct ObjectIdGenerator {
+    next_id: AtomicU64,
+}
+
+impl ObjectIdGenerator {
+    fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(1), // Start at 1; 0 is reserved for anonymous detections
+        }
+    }
+
+    fn next(&self) -> ObjectId {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
 
 struct TrackedState {
     object: TrackedObject,
@@ -15,22 +31,17 @@ struct TrackedState {
 /// Tracks objects across frames, computing velocities and maintaining IDs
 pub struct ObjectTracker {
     tracks: HashMap<ObjectId, TrackedState>,
-    id_generator: Arc<ObjectIdGenerator>,
+    id_generator: ObjectIdGenerator,
     association_threshold: f32,
     max_missing_frames: u32,
     frame_dt: f32, // seconds between frames
 }
 
 impl ObjectTracker {
-    pub fn new(
-        id_generator: Arc<ObjectIdGenerator>,
-        association_threshold: f32,
-        max_missing_frames: u32,
-        frame_rate: f32,
-    ) -> Self {
+    pub fn new(association_threshold: f32, max_missing_frames: u32, frame_rate: f32) -> Self {
         Self {
             tracks: HashMap::new(),
-            id_generator,
+            id_generator: ObjectIdGenerator::new(),
             association_threshold,
             max_missing_frames,
             frame_dt: 1.0 / frame_rate,
@@ -202,8 +213,7 @@ mod tests {
 
     #[test]
     fn test_tracking() {
-        let id_gen = Arc::new(ObjectIdGenerator::new());
-        let mut tracker = ObjectTracker::new(id_gen, 5.0, 30, 60.0);
+        let mut tracker = ObjectTracker::new(5.0, 30, 60.0);
 
         // First frame
         let objects = tracker.update(vec![make_object(0, Vec3::new(0.0, 0.0, 0.0))]);
@@ -218,9 +228,8 @@ mod tests {
 
     #[test]
     fn test_velocity_convergence() {
-        let id_gen = Arc::new(ObjectIdGenerator::new());
         // 10 fps -> dt = 0.1s
-        let mut tracker = ObjectTracker::new(id_gen, 5.0, 30, 10.0);
+        let mut tracker = ObjectTracker::new(5.0, 30, 10.0);
 
         // Constant velocity 10 m/s.
         // Pos: 0, 1, 2, 3...
@@ -245,9 +254,8 @@ mod tests {
 
     #[test]
     fn test_association_prediction() {
-        let id_gen = Arc::new(ObjectIdGenerator::new());
         // 10 fps
-        let mut tracker = ObjectTracker::new(id_gen.clone(), 100.0, 30, 10.0);
+        let mut tracker = ObjectTracker::new(100.0, 30, 10.0);
 
         // Object moves 0 -> 2 -> 4 -> 6 -> 8 -> 10. (Velocity 20 m/s).
         let mut track_id = 0;

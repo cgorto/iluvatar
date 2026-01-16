@@ -12,13 +12,8 @@ use iluvatar_core::{
     CameraIntrinsics, CameraPose, DetectionConfig, Fov, GeoPosition, LocalizationStatus,
     PoseUncertainty, RaymarchConfig, VoxelContribution,
 };
-use iluvatar_server::{
-    detector::{ObjectDetector, ObjectIdGenerator},
-    grid::SparseVoxelGrid,
-    tracker::ObjectTracker,
-};
+use iluvatar_server::{detector::ObjectDetector, grid::SparseVoxelGrid, tracker::ObjectTracker};
 use std::f32::consts::PI;
-use std::sync::Arc;
 
 /// A simulated camera that can render a target at a known world position
 #[allow(dead_code)]
@@ -114,7 +109,7 @@ impl SimCamera {
         };
 
         // Simulate a blob of motion pixels around the projected point
-        let blob_radius = 5u32;
+        let blob_radius = 2u32;
         let mut motion_pixels = Vec::new();
 
         for dy in 0..=blob_radius * 2 {
@@ -149,7 +144,7 @@ impl SimCamera {
         use std::collections::HashMap;
 
         let config = RaymarchConfig {
-            max_distance: 200.0,
+            max_distance: 1500.,
             step_size: 0.5,
             ..Default::default()
         };
@@ -236,7 +231,7 @@ fn main() {
     println!("=== Iluvatar Multi-Camera Triangulation Demo ===\n");
 
     // Set up a 100x100x50 meter grid (voxel size = 1m)
-    let grid_setup = GridSetup::new(Vec3::ZERO, UVec3::new(100, 100, 50), 1.0);
+    let grid_setup = GridSetup::new(Vec3::ZERO, UVec3::new(1000, 1000, 1000), 1.0);
 
     // Create the server's voxel grid
     let grid = SparseVoxelGrid::new(
@@ -247,14 +242,14 @@ fn main() {
     );
 
     // Position 4 cameras around the perimeter, all looking at center
-    let center = Vec3::new(50.0, 50.0, 10.0);
-    let camera_positions = [
-        Vec3::new(10.0, 50.0, 15.0), // West
-        Vec3::new(90.0, 50.0, 15.0), // East
-        Vec3::new(50.0, 10.0, 15.0), // South
-        Vec3::new(50.0, 90.0, 15.0), // North
-    ];
 
+    let center = Vec3::new(500.0, 500.0, 200.0);
+    let camera_positions = [
+        Vec3::new(100.0, 500.0, 50.0), // West
+        Vec3::new(900.0, 500.0, 50.0), // East
+        Vec3::new(500.0, 100.0, 50.0), // South
+        Vec3::new(500.0, 900.0, 50.0), // North
+    ];
     let cameras: Vec<SimCamera> = camera_positions
         .iter()
         .enumerate()
@@ -271,7 +266,7 @@ fn main() {
     println!("Cameras: {} positioned around perimeter\n", cameras.len());
 
     // Ground truth: target position
-    let target_pos = Vec3::new(55.0, 48.0, 12.0);
+    let target_pos = Vec3::new(550.0, 480.0, 100.0);
     println!(
         "Ground truth target position: ({:.1}, {:.1}, {:.1})\n",
         target_pos.x, target_pos.y, target_pos.z
@@ -299,7 +294,7 @@ fn main() {
 
     // Run detection pipeline
     let detection_config = DetectionConfig {
-        intensity_threshold: 50.0,
+        intensity_threshold: 100.0,
         min_contributors: 2, // Require at least 2 cameras to see a voxel (triangulation!)
         cluster_epsilon: 5.0, // 5m cluster radius
         cluster_min_points: 3,
@@ -309,14 +304,13 @@ fn main() {
     println!("Detected {} points above threshold\n", points.len());
 
     // Run DBSCAN clustering
-    let id_gen = Arc::new(ObjectIdGenerator::new());
-    let mut detector = ObjectDetector::new(detection_config.clone(), Arc::clone(&id_gen));
+    let mut detector = ObjectDetector::new(detection_config.clone());
     let detected_objects = detector.detect(&points);
 
     println!("DBSCAN found {} clusters\n", detected_objects.len());
 
     // Run tracker (single frame, so mostly just assigns IDs)
-    let mut tracker = ObjectTracker::new(Arc::clone(&id_gen), 10.0, 30, 60.0);
+    let mut tracker = ObjectTracker::new(10.0, 30, 60.0);
     let tracked_objects = tracker.update(detected_objects);
 
     // Report results
@@ -375,12 +369,11 @@ fn main() {
     // Part 2: Moving target with velocity tracking
     println!("\n\n=== Part 2: Moving Target Tracking ===\n");
 
-    let id_gen2 = Arc::new(ObjectIdGenerator::new());
-    let mut tracker2 = ObjectTracker::new(Arc::clone(&id_gen2), 10.0, 30, 60.0);
+    let mut tracker2 = ObjectTracker::new(5.0, 30, 60.0);
 
     // Target moves from (30, 30, 10) toward (70, 70, 10) at 2m/frame
-    let start_pos = Vec3::new(30.0, 30.0, 10.0);
-    let velocity = Vec3::new(2.0, 2.0, 0.0); // 2m/frame in X and Y
+    let start_pos = Vec3::new(300.0, 300.0, 300.0);
+    let velocity = Vec3::new(20.0, 20.0, 0.0); // 2m/frame in X and Y
 
     println!(
         "Target path: ({:.0}, {:.0}, {:.0}) → ({:.0}, {:.0}, {:.0})",
@@ -396,8 +389,11 @@ fn main() {
         velocity.x, velocity.y, velocity.z
     );
 
+    let dt_ms: u64 = 16;
+
     for frame in 0..10 {
         let current_pos = start_pos + velocity * frame as f32;
+        let current_time = frame as u64 * dt_ms;
 
         // Create fresh grid for each frame (simulating decay clearing old data)
         let frame_grid = SparseVoxelGrid::new(
@@ -417,7 +413,7 @@ fn main() {
         // Detect objects
         let points =
             frame_grid.extract_points_with_camera_count(&detection_config, num_cameras as u8);
-        let mut detector2 = ObjectDetector::new(detection_config.clone(), Arc::clone(&id_gen2));
+        let mut detector2 = ObjectDetector::new(detection_config.clone());
         let detected = detector2.detect(&points);
 
         // Track

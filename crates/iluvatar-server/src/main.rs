@@ -2,7 +2,7 @@ use iluvatar_core::{CameraFrame, TrackedObject};
 use iluvatar_server::{
     camera_mgmt::CameraRegistry,
     config::{ConfigError, ServerConfig},
-    detector::{ObjectDetector, ObjectIdGenerator},
+    detector::ObjectDetector,
     grid::SparseVoxelGrid,
     tracker::ObjectTracker,
 };
@@ -58,9 +58,6 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
         config.decay.rate,
     ));
 
-    // Shared ID generator for detector and tracker
-    let id_generator = Arc::new(ObjectIdGenerator::new());
-
     // Frame channel from cameras to processing
     let (_frame_tx, frame_rx) = async_channel::bounded::<CameraFrame>(1000);
 
@@ -81,9 +78,9 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
     );
 
     // Initialize detection and tracking
-    let mut detector = ObjectDetector::new(config.to_detection_config(), id_generator.clone());
+    // Note: Only the tracker generates object IDs - detections are anonymous until tracked
+    let mut detector = ObjectDetector::new(config.to_detection_config());
     let mut tracker = ObjectTracker::new(
-        id_generator.clone(),
         config.tracking.association_threshold,
         config.tracking.max_missing_frames,
         config.server.broadcast_rate_hz, // Use broadcast rate as effective frame rate

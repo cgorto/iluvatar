@@ -177,7 +177,7 @@ impl Raymarcher {
         while t_current <= t_max && self.in_bounds(ix, iy, iz) {
             // Accumulate contribution for current voxel
             let attenuation = self.config.attenuation.compute(t_current);
-            let contribution = ray.intensity * attenuation;
+            let contribution = (ray.intensity * attenuation).max(0.0);
 
             contributions
                 .entry((ix as u32, iy as u32, iz as u32))

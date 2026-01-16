@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use iluvatar_core::{CameraId, CameraIntrinsics, Fov};
 
+use crate::capture::config::CaptureConfig;
+
 pub struct CamerasPlugin;
 
 impl Plugin for CamerasPlugin {
@@ -21,6 +23,7 @@ pub fn spawn_simulated_cameras(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    config: Res<CaptureConfig>,
 ) {
     let camera_positions = [
         (Vec3::new(-100.0, 30.0, -100.0), "Camera 1"),
@@ -30,10 +33,17 @@ pub fn spawn_simulated_cameras(
         (Vec3::new(0.0, 50.0, 0.0), "Camera 5 (overhead)"),
     ];
 
+    // Build intrinsics that match the actual render target resolution
     let intrinsics = CameraIntrinsics {
-        focal_length: glam::Vec2::new(500.0, 500.0),
-        principal_point: glam::Vec2::new(960.0, 540.0),
-        resolution: glam::UVec2::new(1920, 1080),
+        focal_length: glam::Vec2::new(
+            config.render_width as f32 * 0.78, // ~90° horizontal FOV
+            config.render_height as f32 * 0.78,
+        ),
+        principal_point: glam::Vec2::new(
+            config.render_width as f32 / 2.0,
+            config.render_height as f32 / 2.0,
+        ),
+        resolution: glam::UVec2::new(config.render_width, config.render_height),
         fov: Fov {
             horizontal: std::f32::consts::FRAC_PI_2,
             vertical: std::f32::consts::FRAC_PI_4,

@@ -80,8 +80,24 @@ pub struct BoundingBox {
 }
 
 impl BoundingBox {
+    /// Creates a new bounding box. In debug builds, panics if min > max on any axis.
     pub fn new(min: Vec3, max: Vec3) -> Self {
+        debug_assert!(
+            min.x <= max.x && min.y <= max.y && min.z <= max.z,
+            "Invalid bounding box: min ({:?}) must be <= max ({:?})",
+            min,
+            max
+        );
         Self { min, max }
+    }
+
+    /// Creates a new bounding box, returning None if min > max on any axis.
+    pub fn new_checked(min: Vec3, max: Vec3) -> Option<Self> {
+        if min.x <= max.x && min.y <= max.y && min.z <= max.z {
+            Some(Self { min, max })
+        } else {
+            None
+        }
     }
 
     pub fn contains(&self, point: Vec3) -> bool {

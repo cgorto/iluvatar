@@ -84,14 +84,23 @@ impl SparseVoxelGrid {
 
     /// Add contributions from a specific camera.
     /// The camera_id is used to track unique camera contributors per voxel.
+    ///
+    /// # Panics
+    /// Panics if `camera_id >= 64`. The camera bitmask is stored as a u64,
+    /// limiting the system to 64 unique cameras. If more cameras are needed,
+    /// the `camera_mask` field in `Voxel` must be changed to u128.
     pub fn add_camera_contributions(
         &self,
         camera_id: CameraId,
         contributions: &[VoxelContribution],
     ) {
+        assert!(
+            camera_id < 64,
+            "Camera ID {} exceeds maximum of 63 (64-camera limit due to u64 bitmask)",
+            camera_id
+        );
         let now = Instant::now();
-        // Use camera_id mod 64 for bitmask (supports up to 64 unique cameras)
-        let camera_bit = 1u64 << (camera_id % 64);
+        let camera_bit = 1u64 << camera_id;
 
         for contrib in contributions {
             if !self.in_bounds(contrib.index) {
@@ -179,6 +188,38 @@ impl SparseVoxelGrid {
     /// Get count of active voxels
     pub fn active_count(&self) -> usize {
         self.voxels.len()
+    }
+
+    /// Iterate over all active voxels for visualization purposes.
+    ///
+    /// Returns tuples of (world_position, intensity, camera_count).
+    /// The `intensity_threshold` parameter filters out dim voxels.
+    /// The `max_voxels` parameter limits the number of returned voxels for performance.
+    pub fn iter_voxels_for_visualization(
+        &self,
+        intensity_threshold: f32,
+        max_voxels: usize,
+    ) -> Vec<(Vec3, f32, u8)> {
+        self.voxels
+            .iter()
+            .filter(|entry| entry.value().intensity >= intensity_threshold)
+            .take(max_voxels)
+            .map(|entry| {
+                let idx = *entry.key();
+                let v = entry.value();
+                let pos = Self::unpack_index(idx);
+                (self.voxel_to_world(pos), v.intensity, v.camera_count())
+            })
+            .collect()
+    }
+
+    /// Get the maximum intensity among all active voxels (for normalization).
+    /// Returns 0.0 if there are no active voxels.
+    pub fn max_intensity(&self) -> f32 {
+        self.voxels
+            .iter()
+            .map(|entry| entry.value().intensity)
+            .fold(0.0f32, f32::max)
     }
 }
 

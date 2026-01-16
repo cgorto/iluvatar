@@ -1,26 +1,6 @@
 use glam::Vec3;
-use iluvatar_core::{BoundingBox, DetectedPoint, DetectionConfig, ObjectId, TrackedObject};
+use iluvatar_core::{BoundingBox, DetectedPoint, DetectionConfig, TrackedObject};
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Shared ID generator for consistent object IDs across detector and tracker
-#[derive(Default)]
-pub struct ObjectIdGenerator {
-    next_id: AtomicU64,
-}
-
-impl ObjectIdGenerator {
-    pub fn new() -> Self {
-        Self {
-            next_id: AtomicU64::new(0),
-        }
-    }
-
-    pub fn next(&self) -> ObjectId {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-}
 
 /// Spatial hash grid for O(1) neighbor queries
 struct SpatialIndex {
@@ -88,16 +68,14 @@ impl SpatialIndex {
 /// DBSCAN-style clustering for detected points
 pub struct ObjectDetector {
     config: DetectionConfig,
-    id_generator: Arc<ObjectIdGenerator>,
     spatial_index: SpatialIndex,
 }
 
 impl ObjectDetector {
-    pub fn new(config: DetectionConfig, id_generator: Arc<ObjectIdGenerator>) -> Self {
+    pub fn new(config: DetectionConfig) -> Self {
         let cell_size = config.cluster_epsilon;
         Self {
             config,
-            id_generator,
             spatial_index: SpatialIndex::new(cell_size),
         }
     }
@@ -154,7 +132,7 @@ impl ObjectDetector {
                     self.spatial_index
                         .query_radius(points, points[q].position, epsilon);
                 if q_neighbors.len() >= self.config.cluster_min_points {
-                    seeds.extend(q_neighbors);
+                    seeds.extend(q_neighbors.iter().filter(|&&idx| !visited[idx]));
                 }
             }
 
@@ -164,10 +142,9 @@ impl ObjectDetector {
         clusters
     }
 
-    /// Convert a cluster of points to a tracked object
+    /// Convert a cluster of points to a tracked object.
+    /// Uses id=0 as a sentinel - the tracker assigns real IDs.
     fn cluster_to_object(&self, cluster: Vec<&DetectedPoint>) -> TrackedObject {
-        let id = self.id_generator.next();
-
         let mut total_intensity = 0.0;
         let mut total_confidence = 0.0;
         let mut centroid = Vec3::ZERO;
@@ -186,7 +163,7 @@ impl ObjectDetector {
         centroid /= count as f32;
 
         TrackedObject {
-            id,
+            id: 0, // Anonymous - tracker assigns real ID
             centroid,
             bounding_box: BoundingBox::new(min, max),
             point_count: count,
@@ -203,16 +180,12 @@ mod tests {
 
     #[test]
     fn test_clustering() {
-        let id_gen = Arc::new(ObjectIdGenerator::new());
-        let mut detector = ObjectDetector::new(
-            DetectionConfig {
-                intensity_threshold: 1.0,
-                min_contributors: 1,
-                cluster_epsilon: 2.0,
-                cluster_min_points: 2,
-            },
-            id_gen,
-        );
+        let mut detector = ObjectDetector::new(DetectionConfig {
+            intensity_threshold: 1.0,
+            min_contributors: 1,
+            cluster_epsilon: 2.0,
+            cluster_min_points: 2,
+        });
 
         // Two clusters
         let points = vec![
@@ -267,16 +240,12 @@ mod proptests {
                 })
                 .collect();
 
-            let id_gen = Arc::new(ObjectIdGenerator::new());
-            let mut detector = ObjectDetector::new(
-                DetectionConfig {
-                    intensity_threshold: 0.5,
-                    min_contributors: 1,
-                    cluster_epsilon: 1.0,
-                    cluster_min_points: 2,
-                },
-                id_gen,
-            );
+            let mut detector = ObjectDetector::new(DetectionConfig {
+                intensity_threshold: 0.5,
+                min_contributors: 1,
+                cluster_epsilon: 1.0,
+                cluster_min_points: 2,
+            });
 
             // Should not panic
             let _ = detector.detect(&points);
