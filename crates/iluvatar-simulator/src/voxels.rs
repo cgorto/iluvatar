@@ -260,9 +260,10 @@ impl<'a> SimulatorRaymarcher<'a> {
 }
 
 /// Project targets and cast rays using the real DDA algorithm
-fn project_and_raymarch(
+pub fn project_and_raymarch(
     mut grid_res: ResMut<VoxelGridResource>,
     sim_config: Res<SimulatorConfig>,
+    tracking_config: Option<Res<crate::tracking::TrackingConfig>>,
     cameras: Query<(Entity, &Transform, &CaptureCamera)>,
     targets: Query<&Transform, With<Target>>,
 ) {
@@ -272,6 +273,17 @@ fn project_and_raymarch(
     let voxel_size = sim_config.voxel_size;
     let grid_dims = sim_config.grid_dimensions;
     let ray_intensity = sim_config.ray_intensity;
+
+    // Clear the grid if configured to do so (frame-by-frame mode)
+    // This eliminates ghost voxels from previous frames - fresh slate!
+    let should_clear = tracking_config
+        .as_ref()
+        .map(|c| c.clear_grid_each_frame)
+        .unwrap_or(false);
+
+    if should_clear {
+        grid_res.grid.clear();
+    }
 
     // Reset stats
     grid_res.rays_cast = 0;
@@ -339,62 +351,74 @@ fn visualize_voxels(
     mut gizmos: Gizmos,
     grid_res: Res<VoxelGridResource>,
     sim_config: Res<SimulatorConfig>,
+    vis_config: Option<Res<crate::debug_ui::VisualizationConfig>>,
     cameras: Query<&Transform, With<CaptureCamera>>,
     targets: Query<&Transform, With<Target>>,
 ) {
+    let show_voxels = vis_config.as_ref().is_none_or(|c| c.show_voxels);
+    let show_cameras = vis_config.as_ref().is_none_or(|c| c.show_cameras);
+    let show_targets = vis_config.as_ref().is_none_or(|c| c.show_targets);
+
     // Get voxels for visualization from the real grid
-    let max_intensity = grid_res.grid.max_intensity().max(1.0);
+    if show_voxels {
+        let max_intensity = grid_res.grid.max_intensity().max(1.0);
 
-    // Use the grid's visualization iterator
-    let voxels = grid_res.grid.iter_voxels_for_visualization(
-        sim_config.visualization_threshold,
-        10000, // Max voxels to render
-    );
-
-    for (world_pos, intensity, camera_count) in voxels {
-        // Adjust position for grid origin (real grid uses 0-based coordinates)
-        let pos = world_pos + sim_config.grid_origin;
-        let t = (intensity / max_intensity).clamp(0.0, 1.0);
-
-        // Color based on intensity AND camera count
-        // Multi-camera contributions get brighter/warmer colors
-        let color = if camera_count >= 2 {
-            // Hot colors for multi-camera consensus (the good stuff!)
-            Color::srgb(1.0, 1.0 - t * 0.5, 0.0)
-        } else if t < 0.5 {
-            // Cool colors for single-camera, low intensity
-            Color::srgb(t * 2.0, t * 2.0, 1.0 - t * 2.0)
-        } else {
-            // Warm colors for single-camera, high intensity
-            Color::srgb(1.0, 2.0 - t * 2.0, 0.0)
-        };
-
-        gizmos.cube(
-            Transform::from_translation(pos).with_scale(Vec3::splat(sim_config.voxel_size * 0.8)),
-            color,
+        // Use the grid's visualization iterator
+        let voxels = grid_res.grid.iter_voxels_for_visualization(
+            sim_config.visualization_threshold,
+            10000, // Max voxels to render
         );
+
+        for (world_pos, intensity, camera_count) in voxels {
+            // Adjust position for grid origin (real grid uses 0-based coordinates)
+            let pos = world_pos + sim_config.grid_origin;
+            let t = (intensity / max_intensity).clamp(0.0, 1.0);
+
+            // Color based on intensity AND camera count
+            // Multi-camera contributions get brighter/warmer colors
+            let color = if camera_count >= 2 {
+                // Hot colors for multi-camera consensus (the good stuff!)
+                Color::srgb(1.0, 1.0 - t * 0.5, 0.0)
+            } else if t < 0.5 {
+                // Cool colors for single-camera, low intensity
+                Color::srgb(t * 2.0, t * 2.0, 1.0 - t * 2.0)
+            } else {
+                // Warm colors for single-camera, high intensity
+                Color::srgb(1.0, 2.0 - t * 2.0, 0.0)
+            };
+
+            gizmos.cube(
+                Transform::from_translation(pos)
+                    .with_scale(Vec3::splat(sim_config.voxel_size * 0.8)),
+                color,
+            );
+        }
     }
 
     // Draw camera frustum outline
-    for cam_transform in cameras.iter() {
-        let forward = cam_transform.forward() * 50.0;
-        let pos = cam_transform.translation;
+    if show_cameras {
+        for cam_transform in cameras.iter() {
+            let forward = cam_transform.forward() * 50.0;
+            let pos = cam_transform.translation;
 
-        gizmos.line(pos, pos + forward, Color::srgb(0.0, 1.0, 0.0));
-        gizmos.sphere(
-            Isometry3d::from_translation(pos),
-            2.0,
-            Color::srgb(0.5, 0.2, 0.8),
-        );
+            gizmos.line(pos, pos + forward, Color::srgb(0.0, 1.0, 0.0));
+            gizmos.sphere(
+                Isometry3d::from_translation(pos),
+                2.0,
+                Color::srgb(0.5, 0.2, 0.8),
+            );
+        }
     }
 
     // Draw target positions
-    for target_transform in targets.iter() {
-        gizmos.sphere(
-            Isometry3d::from_translation(target_transform.translation),
-            4.0,
-            Color::srgb(0.0, 1.0, 0.0),
-        );
+    if show_targets {
+        for target_transform in targets.iter() {
+            gizmos.sphere(
+                Isometry3d::from_translation(target_transform.translation),
+                4.0,
+                Color::srgb(0.0, 1.0, 0.0),
+            );
+        }
     }
 }
 

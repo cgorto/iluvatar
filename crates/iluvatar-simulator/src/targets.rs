@@ -41,6 +41,23 @@ impl TargetPath {
     pub fn current_position(&self) -> Vec3 {
         self.start.lerp(self.end, self.progress)
     }
+
+    /// Get the current velocity in world coordinates (meters per second)
+    pub fn current_velocity(&self) -> Vec3 {
+        // The path direction is (end - start), and we move at `speed` progress/second
+        // Velocity = (end - start) * speed * direction
+        (self.end - self.start) * self.speed * self.direction
+    }
+
+    /// Get the path length in meters
+    pub fn path_length(&self) -> f32 {
+        (self.end - self.start).length()
+    }
+
+    /// Get the speed in meters per second
+    pub fn speed_mps(&self) -> f32 {
+        self.path_length() * self.speed
+    }
 }
 
 fn spawn_targets(

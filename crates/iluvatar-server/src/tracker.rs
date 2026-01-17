@@ -123,8 +123,13 @@ impl ObjectTracker {
             }
 
             // Initialize Kalman filter
-            // Tuning parameters: process noise 5.0 (high accel), measurement noise 0.5 (precise detection)
-            let kalman = Kalman3D::new(object.centroid, 5.0, 0.5);
+            // Tuning: balance between responsive velocity estimation and stable tracking.
+            // - process_noise: expected acceleration std dev (m/s²). Higher = more responsive to changes
+            // - measurement_noise: position uncertainty (m). Higher = trust velocity model more
+            //
+            // Old values (5.0, 0.5) caused velocity under-estimation because Q >> R.
+            // We need Q/R ratio that lets velocity converge but still predicts well.
+            let kalman = Kalman3D::new(object.centroid, 2.0, 1.0);
 
             self.tracks.insert(
                 id,

@@ -9,6 +9,23 @@ use std::time::Instant;
 
 const INTENSITY_THRESHOLD: f32 = 0.01;
 
+/// Compute the Nth percentile of a slice using quickselect.
+/// Percentile should be 0.0 to 1.0 (e.g., 0.9 for 90th percentile).
+/// Modifies the input slice (partial sort).
+fn compute_percentile(values: &mut [f32], percentile: f32) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let idx = ((values.len() - 1) as f32 * percentile).round() as usize;
+    let idx = idx.min(values.len() - 1);
+
+    // Use select_nth_unstable for O(n) percentile finding
+    let (_, median, _) = values.select_nth_unstable_by(idx, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    *median
+}
+
 #[derive(Debug, Clone)]
 pub struct Voxel {
     pub intensity: f32,
@@ -188,6 +205,78 @@ impl SparseVoxelGrid {
     /// Get count of active voxels
     pub fn active_count(&self) -> usize {
         self.voxels.len()
+    }
+
+    /// Clear all voxels from the grid.
+    /// Useful for frame-by-frame processing where you want a fresh slate
+    /// instead of relying on decay.
+    pub fn clear(&self) {
+        self.voxels.clear();
+    }
+
+    /// Reset camera masks on all voxels without clearing intensity.
+    /// Call this at the start of each frame to ensure camera_count
+    /// reflects only the current frame's contributions.
+    pub fn reset_camera_masks(&self) {
+        for mut entry in self.voxels.iter_mut() {
+            entry.value_mut().camera_mask = 0;
+        }
+    }
+
+    /// Extract points using percentile-based filtering.
+    ///
+    /// Instead of a fixed intensity threshold, this keeps only the top N% of voxels
+    /// by intensity. This is crucial for finding the true ray intersection hotspots
+    /// when dealing with noisy data.
+    ///
+    /// # Arguments
+    /// * `percentile` - Value between 0.0 and 1.0. 0.9 means keep top 10%.
+    /// * `min_camera_count` - Minimum number of cameras that must contribute
+    /// * `active_cameras` - Total number of active cameras (for confidence calc)
+    ///
+    /// # Returns
+    /// Points above the percentile threshold that also meet the camera count requirement.
+    pub fn extract_points_percentile(
+        &self,
+        percentile: f32,
+        min_camera_count: u8,
+        active_cameras: u8,
+    ) -> Vec<DetectedPoint> {
+        // First pass: collect all intensities from voxels meeting camera requirement
+        let mut intensities: Vec<f32> = self
+            .voxels
+            .iter()
+            .filter(|entry| entry.value().camera_count() >= min_camera_count)
+            .map(|entry| entry.value().intensity)
+            .collect();
+
+        if intensities.is_empty() {
+            return Vec::new();
+        }
+
+        // Find the percentile threshold
+        // For top 10%, we want the 90th percentile value
+        let threshold = compute_percentile(&mut intensities, percentile);
+
+        // Second pass: extract points above threshold
+        self.voxels
+            .iter()
+            .filter(|entry| {
+                let v = entry.value();
+                v.intensity >= threshold && v.camera_count() >= min_camera_count
+            })
+            .map(|entry| {
+                let idx = *entry.key();
+                let v = entry.value();
+                let pos = Self::unpack_index(idx);
+
+                DetectedPoint {
+                    position: self.voxel_to_world(pos),
+                    intensity: v.intensity,
+                    confidence: v.camera_count() as f32 / active_cameras as f32,
+                }
+            })
+            .collect()
     }
 
     /// Iterate over all active voxels for visualization purposes.
@@ -393,6 +482,96 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    #[test]
+    fn test_percentile_extraction() {
+        let grid = SparseVoxelGrid::new(
+            GeoPosition::new(0.0, 0.0, 0.0),
+            UVec3::new(100, 100, 100),
+            1.0,
+            0.0, // No decay
+        );
+
+        // Add 10 voxels with varying intensities from 2 cameras
+        // Voxels at positions 0-9 with intensities 1.0-10.0
+        for i in 0..10 {
+            let contrib = vec![VoxelContribution {
+                index: UVec3::new(i, 0, 0),
+                intensity: (i + 1) as f32, // 1.0 to 10.0
+            }];
+            // Add from camera 0 and camera 1 for multi-camera requirement
+            grid.add_camera_contributions(0, &contrib);
+            grid.add_camera_contributions(1, &contrib);
+        }
+
+        assert_eq!(grid.active_count(), 10);
+
+        // Extract top 10% (90th percentile) - should get the top voxels
+        // With 10 items, 90th percentile is at index 9 (the max)
+        // Due to rounding, we might get 1-2 voxels at or above threshold
+        let points = grid.extract_points_percentile(0.9, 2, 2);
+        assert!(points.len() >= 1 && points.len() <= 2);
+        // The brightest voxel has intensity 20.0 (10 + 10 from two cameras)
+        let max_intensity = points.iter().map(|p| p.intensity).fold(0.0f32, f32::max);
+        assert!(max_intensity >= 19.0);
+
+        // Extract top 50% (50th percentile) - should get ~5 voxels
+        let points = grid.extract_points_percentile(0.5, 2, 2);
+        assert!(points.len() >= 4 && points.len() <= 6);
+
+        // With min_camera_count = 3, should get nothing (we only have 2 cameras)
+        let points = grid.extract_points_percentile(0.5, 3, 2);
+        assert_eq!(points.len(), 0);
+    }
+
+    #[test]
+    fn test_clear() {
+        let grid = SparseVoxelGrid::new(
+            GeoPosition::new(0.0, 0.0, 0.0),
+            UVec3::new(100, 100, 100),
+            1.0,
+            0.0,
+        );
+
+        let contrib = vec![VoxelContribution {
+            index: UVec3::new(10, 10, 10),
+            intensity: 5.0,
+        }];
+        grid.add_camera_contributions(0, &contrib);
+        assert_eq!(grid.active_count(), 1);
+
+        grid.clear();
+        assert_eq!(grid.active_count(), 0);
+    }
+
+    #[test]
+    fn test_reset_camera_masks() {
+        let grid = SparseVoxelGrid::new(
+            GeoPosition::new(0.0, 0.0, 0.0),
+            UVec3::new(100, 100, 100),
+            1.0,
+            0.0,
+        );
+
+        let contrib = vec![VoxelContribution {
+            index: UVec3::new(10, 10, 10),
+            intensity: 5.0,
+        }];
+
+        // Add from two cameras
+        grid.add_camera_contributions(0, &contrib);
+        grid.add_camera_contributions(1, &contrib);
+
+        let packed = SparseVoxelGrid::pack_index(10, 10, 10);
+        assert_eq!(grid.voxels.get(&packed).unwrap().camera_count(), 2);
+
+        // Reset masks
+        grid.reset_camera_masks();
+        assert_eq!(grid.voxels.get(&packed).unwrap().camera_count(), 0);
+
+        // Intensity should be preserved
+        assert!((grid.voxels.get(&packed).unwrap().intensity - 10.0).abs() < 0.01);
     }
 }
 
