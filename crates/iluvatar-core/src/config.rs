@@ -79,18 +79,17 @@ impl Default for RaymarchConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "mode")]
 pub enum AttenuationConfig {
+    #[default]
     None,
-    Linear { max_distance: f32 },
-    InverseSquare { reference_distance: f32 },
-}
-
-impl Default for AttenuationConfig {
-    fn default() -> Self {
-        Self::None
-    }
+    Linear {
+        max_distance: f32,
+    },
+    InverseSquare {
+        reference_distance: f32,
+    },
 }
 
 impl AttenuationConfig {

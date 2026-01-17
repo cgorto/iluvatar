@@ -27,6 +27,7 @@ pub enum CameraMessage {
     Register(CameraRegistration),
     Frame(CameraFrame),
     Heartbeat { camera_id: CameraId, timestamp: u64 },
+    TimeSync { timestamp: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

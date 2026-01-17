@@ -37,6 +37,62 @@ where
     pub fn motion_count(&self) -> usize {
         self.data.as_ref().iter().filter(|&&v| v > 0).count()
     }
+
+    /// Filter out isolated pixels (noise)
+    /// Performs a single pass of erosion: pixels must have at least `min_neighbors` active neighbors
+    /// (out of 8) to survive.
+    pub fn filter_noise(&mut self, min_neighbors: u8)
+    where
+        S: AsMut<[u8]> + AsRef<[u8]>,
+    {
+        // We need a copy of the data to check neighbors while modifying
+        // Since S is generic, we can't easily clone it if it's &mut [u8].
+        // But wait, the mask is usually created as &mut [u8] in the arena.
+        // We can't clone &mut [u8].
+        // We can create a temporary bitset or vector.
+        let width = self.width;
+        let height = self.height;
+        // Scope for immutable borrow
+        let to_clear = {
+            let data = self.data.as_ref();
+            let mut to_clear = Vec::new();
+
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    if data[idx] > 0 {
+                        let mut neighbors = 0;
+                        for dy in -1..=1 {
+                            for dx in -1..=1 {
+                                if dx == 0 && dy == 0 {
+                                    continue;
+                                }
+
+                                let nx = x as i32 + dx;
+                                let ny = y as i32 + dy;
+
+                                if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                                    if data[(ny as u32 * width + nx as u32) as usize] > 0 {
+                                        neighbors += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        if neighbors < min_neighbors {
+                            to_clear.push(idx);
+                        }
+                    }
+                }
+            }
+            to_clear
+        };
+
+        let data_mut = self.data.as_mut();
+        for idx in to_clear {
+            data_mut[idx] = 0;
+        }
+    }
 }
 
 impl<S> DifferenceMask<S>
@@ -73,6 +129,7 @@ impl<'a> DifferenceMask<&'a mut [u8]> {
 pub struct FrameProcessor {
     previous_frame: Option<GrayscaleFrame<Vec<u8>>>,
     threshold: u8,
+    min_neighbors: u8,
 }
 
 impl FrameProcessor {
@@ -80,11 +137,16 @@ impl FrameProcessor {
         Self {
             previous_frame: None,
             threshold,
+            min_neighbors: 2, // Default to requiring 2 neighbors
         }
     }
 
     pub fn set_threshold(&mut self, threshold: u8) {
         self.threshold = threshold;
+    }
+
+    pub fn set_min_neighbors(&mut self, min_neighbors: u8) {
+        self.min_neighbors = min_neighbors;
     }
 
     /// Compute difference mask between current and previous frame
@@ -101,7 +163,7 @@ impl FrameProcessor {
                 // Resolution changed, reset previous
                 None
             } else {
-                let mask = DifferenceMask::new_in(arena, current.width, current.height);
+                let mut mask = DifferenceMask::new_in(arena, current.width, current.height);
                 let mask_data = mask.data.as_mut();
 
                 for (i, (curr, prev)) in current
@@ -115,6 +177,11 @@ impl FrameProcessor {
                         mask_data[i] = diff;
                     }
                 }
+
+                if self.min_neighbors > 0 {
+                    mask.filter_noise(self.min_neighbors);
+                }
+
                 Some(mask)
             }
         } else {

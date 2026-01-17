@@ -89,7 +89,7 @@ impl Default for TrackingConfig {
             trail_length: 60, // 1 second of history
             min_visualization_confidence: 0.3,
             use_percentile_extraction: true, // NEW: use percentile-based extraction
-            extraction_percentile: 0.85,     // Keep top 15% - more points per target
+            extraction_percentile: 0.80,     // Keep top 20% - more forgiving for sparse data
             clear_grid_each_frame: true,     // NEW: fresh slate each frame
         }
     }
@@ -154,6 +154,7 @@ pub struct TrackingMetrics {
 /// 2. Cluster them into discrete objects
 /// 3. Update the tracker with the detections
 fn run_detection_and_tracking(
+    time: Res<Time>,
     grid_res: Res<VoxelGridResource>,
     config: Res<TrackingConfig>,
     mut state: ResMut<TrackingState>,
@@ -190,7 +191,7 @@ fn run_detection_and_tracking(
     // - Association (matching detections to existing tracks)
     // - Kalman filter predict/update cycle
     // - Track lifecycle (birth, death)
-    let tracked = state.tracker.update(detections);
+    let tracked = state.tracker.update(detections, time.delta_secs());
 
     metrics.tracked_count = tracked.len();
 
@@ -287,17 +288,19 @@ fn visualize_tracked_objects(
 
 /// Compute tracking metrics by comparing to ground truth
 fn compute_tracking_metrics(
+    time: Res<Time>,
     state: Res<TrackingState>,
     sim_config: Res<SimulatorConfig>,
     targets: Query<(&Transform, &TargetPath), With<Target>>,
     mut metrics: ResMut<TrackingMetrics>,
 ) {
     let grid_origin = sim_config.grid_origin;
+    let t = time.elapsed_secs();
 
     // Collect ground truth positions and velocities
     let ground_truth: Vec<(Vec3, Vec3)> = targets
         .iter()
-        .map(|(t, path)| (t.translation, path.current_velocity()))
+        .map(|(transform, path)| (transform.translation, path.current_velocity(t)))
         .collect();
     metrics.ground_truth_count = ground_truth.len();
 
@@ -360,6 +363,7 @@ fn print_tracking_stats(
     time: Res<Time>,
     state: Res<TrackingState>,
     sim_config: Res<SimulatorConfig>,
+    targets: Query<(&Transform, &TargetPath, &Target)>,
     metrics: Res<TrackingMetrics>,
     mut last_print: Local<f32>,
 ) {
@@ -383,24 +387,49 @@ fn print_tracking_stats(
             metrics.avg_velocity_error
         );
 
+        // Collect ground truth for matching
+        let ground_truth: Vec<(Vec3, Vec3, u32)> = targets
+            .iter()
+            .map(|(t, path, target)| (t.translation, path.current_velocity(now), target.id))
+            .collect();
+
         for obj in &state.tracked_objects {
             // Convert grid-local centroid to world coordinates for display
             let world_pos = obj.centroid + grid_origin;
-            let vel_str = obj
-                .velocity
-                .map(|v| {
+
+            // Find closest ground truth target
+            let closest_gt = ground_truth.iter().min_by(|a, b| {
+                let da = world_pos.distance(a.0);
+                let db = world_pos.distance(b.0);
+                da.partial_cmp(&db).unwrap()
+            });
+
+            let (vel_str, gt_info) = if let Some(vel) = obj.velocity {
+                let vel_str = format!(
+                    "vel=({:.1},{:.1},{:.1}) |v|={:.1}m/s",
+                    vel.x,
+                    vel.y,
+                    vel.z,
+                    vel.length()
+                );
+                let gt_info = if let Some((gt_pos, gt_vel, gt_id)) = closest_gt {
+                    let pos_err = world_pos.distance(*gt_pos);
+                    let vel_err = (vel - *gt_vel).length();
                     format!(
-                        "vel=({:.1},{:.1},{:.1}) |v|={:.1}m/s",
-                        v.x,
-                        v.y,
-                        v.z,
-                        v.length()
+                        " <-> Target {} (pos_err={:.1}m, vel_err={:.1}m/s, gt_vel=({:.1},{:.1},{:.1}))",
+                        gt_id, pos_err, vel_err, gt_vel.x, gt_vel.y, gt_vel.z
                     )
-                })
-                .unwrap_or_else(|| "no velocity".to_string());
+                } else {
+                    String::new()
+                };
+                (vel_str, gt_info)
+            } else {
+                ("no velocity".to_string(), String::new())
+            };
+
             println!(
-                "  Track {}: pos=({:.1},{:.1},{:.1}) {} conf={:.2}",
-                obj.id, world_pos.x, world_pos.y, world_pos.z, vel_str, obj.confidence,
+                "  Track {}: pos=({:.1},{:.1},{:.1}) {} conf={:.2}{}",
+                obj.id, world_pos.x, world_pos.y, world_pos.z, vel_str, obj.confidence, gt_info
             );
         }
     }

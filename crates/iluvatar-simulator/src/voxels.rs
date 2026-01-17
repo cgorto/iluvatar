@@ -17,6 +17,7 @@ use iluvatar_core::{
     AttenuationConfig, BoundingBox, GeoPosition, Ray, RaymarchConfig, VoxelContribution,
 };
 use iluvatar_server::grid::SparseVoxelGrid;
+use iluvatar_server::time::Clock;
 
 use crate::camera::CaptureCamera;
 use crate::targets::Target;
@@ -101,11 +102,13 @@ impl FromWorld for VoxelGridResource {
 
         // Create the real SparseVoxelGrid from iluvatar-server
         // We use a trivial GeoPosition origin since we're working in local coordinates
+        let clock = Clock::new();
         let grid = Arc::new(SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             sim_config.grid_dimensions,
             sim_config.voxel_size,
             sim_config.decay_rate,
+            clock,
         ));
 
         // Configure raymarching with linear attenuation
@@ -427,7 +430,7 @@ fn print_stats(
     time: Res<Time>,
     grid_res: Res<VoxelGridResource>,
     cameras: Query<Entity, With<CaptureCamera>>,
-    targets: Query<(&Transform, &Target)>,
+    targets: Query<(&Transform, &Target, &crate::targets::TargetPath)>,
     mut last_print: Local<f32>,
 ) {
     let now = time.elapsed_secs();
@@ -447,11 +450,19 @@ fn print_stats(
             grid_res.rays_cast, grid_res.voxels_contributed
         );
 
-        for (transform, target) in targets.iter() {
+        for (transform, target, path) in targets.iter() {
             let pos = transform.translation;
+            let vel = path.current_velocity(now);
             println!(
-                "Target {}: ({:.1}, {:.1}, {:.1})",
-                target.id, pos.x, pos.y, pos.z
+                "Target {}: pos=({:.1}, {:.1}, {:.1}) vel=({:.1}, {:.1}, {:.1}) |v|={:.1}m/s",
+                target.id,
+                pos.x,
+                pos.y,
+                pos.z,
+                vel.x,
+                vel.y,
+                vel.z,
+                vel.length()
             );
         }
     }

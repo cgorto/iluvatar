@@ -1,3 +1,4 @@
+use crate::time::{Clock, TimePoint};
 use dashmap::DashMap;
 use glam::{UVec3, Vec3};
 use iluvatar_core::{
@@ -5,7 +6,7 @@ use iluvatar_core::{
     VoxelContribution,
 };
 use parking_lot::Mutex;
-use std::time::Instant;
+use std::sync::Arc;
 
 const INTENSITY_THRESHOLD: f32 = 0.01;
 
@@ -31,7 +32,7 @@ pub struct Voxel {
     pub intensity: f32,
     /// Bitmask of cameras that have contributed to this voxel (supports up to 64 cameras)
     pub camera_mask: u64,
-    pub last_update: Instant,
+    pub last_update: TimePoint,
 }
 
 impl Voxel {
@@ -47,19 +48,56 @@ pub struct SparseVoxelGrid {
     pub dimensions: UVec3,
     pub voxel_size: f32,
     decay_rate: f32,
+    clock: Arc<Clock>,
     /// Last decay time, wrapped in Mutex for interior mutability (allows apply_decay on &self)
-    last_decay: Mutex<Instant>,
+    last_decay: Mutex<TimePoint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GridStats {
+    pub active_voxels: usize,
+    pub memory_usage_bytes: usize,
+    pub max_intensity: f32,
+    pub non_zero_camera_masks: usize,
 }
 
 impl SparseVoxelGrid {
-    pub fn new(origin: GeoPosition, dimensions: UVec3, voxel_size: f32, decay_rate: f32) -> Self {
+    pub fn get_stats(&self) -> GridStats {
+        let mut max_intensity = 0.0f32;
+        let mut non_zero_camera_masks = 0;
+
+        for entry in self.voxels.iter() {
+            let v = entry.value();
+            if v.intensity > max_intensity {
+                max_intensity = v.intensity;
+            }
+            if v.camera_mask != 0 {
+                non_zero_camera_masks += 1;
+            }
+        }
+
+        GridStats {
+            active_voxels: self.voxels.len(),
+            memory_usage_bytes: self.voxels.capacity() * std::mem::size_of::<Voxel>(),
+            max_intensity,
+            non_zero_camera_masks,
+        }
+    }
+    pub fn new(
+        origin: GeoPosition,
+        dimensions: UVec3,
+        voxel_size: f32,
+        decay_rate: f32,
+        clock: Arc<Clock>,
+    ) -> Self {
         Self {
             voxels: DashMap::new(),
             origin,
             dimensions,
             voxel_size,
             decay_rate,
-            last_decay: Mutex::new(Instant::now()),
+            last_decay: Mutex::new(clock.now()),
+            clock,
         }
     }
 
@@ -85,7 +123,7 @@ impl SparseVoxelGrid {
     /// Apply time decay to all voxels.
     /// This method takes &self (not &mut self) so it can be called on Arc<SparseVoxelGrid>.
     pub fn apply_decay(&self) {
-        let now = Instant::now();
+        let now = self.clock.now();
         let mut last_decay = self.last_decay.lock();
         let dt = now.duration_since(*last_decay).as_secs_f32();
         let decay_factor = (-self.decay_rate * dt).exp();
@@ -116,7 +154,7 @@ impl SparseVoxelGrid {
             "Camera ID {} exceeds maximum of 63 (64-camera limit due to u64 bitmask)",
             camera_id
         );
-        let now = Instant::now();
+        let now = self.clock.now();
         let camera_bit = 1u64 << camera_id;
 
         for contrib in contributions {
@@ -242,41 +280,58 @@ impl SparseVoxelGrid {
         min_camera_count: u8,
         active_cameras: u8,
     ) -> Vec<DetectedPoint> {
-        // First pass: collect all intensities from voxels meeting camera requirement
-        let mut intensities: Vec<f32> = self
+        // First pass: collect all voxels meeting camera requirement
+        let qualifying_voxels: Vec<_> = self
             .voxels
             .iter()
             .filter(|entry| entry.value().camera_count() >= min_camera_count)
-            .map(|entry| entry.value().intensity)
+            .map(|entry| (*entry.key(), entry.value().clone()))
             .collect();
 
-        if intensities.is_empty() {
+        if qualifying_voxels.is_empty() {
             return Vec::new();
         }
 
-        // Find the percentile threshold
-        // For top 10%, we want the 90th percentile value
-        let threshold = compute_percentile(&mut intensities, percentile);
+        // Minimum points fallback: if we have very few qualifying voxels,
+        // don't apply percentile filtering - just take them all.
+        // This prevents the "0 detected points" issue when targets are in
+        // sparse visibility regions.
+        const MIN_POINTS_FOR_PERCENTILE: usize = 5;
 
-        // Second pass: extract points above threshold
-        self.voxels
-            .iter()
-            .filter(|entry| {
-                let v = entry.value();
-                v.intensity >= threshold && v.camera_count() >= min_camera_count
-            })
-            .map(|entry| {
-                let idx = *entry.key();
-                let v = entry.value();
-                let pos = Self::unpack_index(idx);
+        let points: Vec<DetectedPoint> = if qualifying_voxels.len() < MIN_POINTS_FOR_PERCENTILE {
+            // Too few points - take them all
+            qualifying_voxels
+                .iter()
+                .map(|(idx, v)| {
+                    let pos = Self::unpack_index(*idx);
+                    DetectedPoint {
+                        position: self.voxel_to_world(pos),
+                        intensity: v.intensity,
+                        confidence: v.camera_count() as f32 / active_cameras as f32,
+                    }
+                })
+                .collect()
+        } else {
+            // Enough points - apply percentile filtering
+            let mut intensities: Vec<f32> =
+                qualifying_voxels.iter().map(|(_, v)| v.intensity).collect();
+            let threshold = compute_percentile(&mut intensities, percentile);
 
-                DetectedPoint {
-                    position: self.voxel_to_world(pos),
-                    intensity: v.intensity,
-                    confidence: v.camera_count() as f32 / active_cameras as f32,
-                }
-            })
-            .collect()
+            qualifying_voxels
+                .iter()
+                .filter(|(_, v)| v.intensity >= threshold)
+                .map(|(idx, v)| {
+                    let pos = Self::unpack_index(*idx);
+                    DetectedPoint {
+                        position: self.voxel_to_world(pos),
+                        intensity: v.intensity,
+                        confidence: v.camera_count() as f32 / active_cameras as f32,
+                    }
+                })
+                .collect()
+        };
+
+        points
     }
 
     /// Iterate over all active voxels for visualization purposes.
@@ -332,11 +387,13 @@ mod tests {
 
     #[test]
     fn test_add_contributions_same_camera() {
+        let clock = Clock::new();
         let grid = SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             UVec3::new(100, 100, 100),
             1.0,
             0.5,
+            clock,
         );
 
         // Two contributions from the same camera
@@ -364,11 +421,13 @@ mod tests {
 
     #[test]
     fn test_add_contributions_multiple_cameras() {
+        let clock = Clock::new();
         let grid = SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             UVec3::new(100, 100, 100),
             1.0,
             0.5,
+            clock,
         );
 
         let contribution = vec![VoxelContribution {
@@ -391,11 +450,13 @@ mod tests {
     #[test]
     fn test_decay_removes_low_intensity_voxels() {
         // Use a high decay rate so voxels decay quickly
+        let clock = Clock::new();
         let grid = SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             UVec3::new(100, 100, 100),
             1.0,
             100.0, // Very high decay rate for testing
+            clock,
         );
 
         // Add a low-intensity voxel
@@ -417,11 +478,13 @@ mod tests {
 
     #[test]
     fn test_decay_preserves_high_intensity_voxels() {
+        let clock = Clock::new();
         let grid = SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             UVec3::new(100, 100, 100),
             1.0,
             0.1, // Low decay rate
+            clock,
         );
 
         // Add a high-intensity voxel
@@ -446,11 +509,13 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
+        let clock = Clock::new();
         let grid = Arc::new(SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             UVec3::new(1000, 1000, 1000),
             1.0,
             0.5,
+            clock,
         ));
 
         let mut handles = vec![];
@@ -486,11 +551,13 @@ mod tests {
 
     #[test]
     fn test_percentile_extraction() {
+        let clock = Clock::new();
         let grid = SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             UVec3::new(100, 100, 100),
             1.0,
             0.0, // No decay
+            clock,
         );
 
         // Add 10 voxels with varying intensities from 2 cameras
@@ -527,11 +594,13 @@ mod tests {
 
     #[test]
     fn test_clear() {
+        let clock = Clock::new();
         let grid = SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             UVec3::new(100, 100, 100),
             1.0,
             0.0,
+            clock,
         );
 
         let contrib = vec![VoxelContribution {
@@ -547,11 +616,13 @@ mod tests {
 
     #[test]
     fn test_reset_camera_masks() {
+        let clock = Clock::new();
         let grid = SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             UVec3::new(100, 100, 100),
             1.0,
             0.0,
+            clock,
         );
 
         let contrib = vec![VoxelContribution {

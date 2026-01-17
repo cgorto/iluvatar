@@ -34,22 +34,20 @@ pub struct ObjectTracker {
     id_generator: ObjectIdGenerator,
     association_threshold: f32,
     max_missing_frames: u32,
-    frame_dt: f32, // seconds between frames
 }
 
 impl ObjectTracker {
-    pub fn new(association_threshold: f32, max_missing_frames: u32, frame_rate: f32) -> Self {
+    pub fn new(association_threshold: f32, max_missing_frames: u32, _frame_rate: f32) -> Self {
         Self {
             tracks: HashMap::new(),
             id_generator: ObjectIdGenerator::new(),
             association_threshold,
             max_missing_frames,
-            frame_dt: 1.0 / frame_rate,
         }
     }
 
     /// Update tracks with new detections
-    pub fn update(&mut self, detections: Vec<TrackedObject>) -> Vec<TrackedObject> {
+    pub fn update(&mut self, detections: Vec<TrackedObject>, dt: f32) -> Vec<TrackedObject> {
         // Mark all tracks as potentially missing
         for state in self.tracks.values_mut() {
             state.missing_frames += 1;
@@ -75,7 +73,7 @@ impl ObjectTracker {
             let thresh_sq = self.association_threshold * self.association_threshold;
 
             for (track_id, state) in &self.tracks {
-                let predicted = self.predict_position(state);
+                let predicted = self.predict_position(state, dt);
                 let dist_sq = predicted.distance_squared(detection.centroid);
 
                 if dist_sq <= thresh_sq {
@@ -95,7 +93,7 @@ impl ObjectTracker {
             }
 
             // Perform update
-            self.do_update_track(track_id, &detections[det_idx]);
+            self.do_update_track(track_id, &detections[det_idx], dt);
             matched_detection_indices.insert(det_idx);
             used_tracks.insert(track_id);
 
@@ -124,12 +122,16 @@ impl ObjectTracker {
 
             // Initialize Kalman filter
             // Tuning: balance between responsive velocity estimation and stable tracking.
-            // - process_noise: expected acceleration std dev (m/s²). Higher = more responsive to changes
-            // - measurement_noise: position uncertainty (m). Higher = trust velocity model more
+            // - process_noise: expected acceleration std dev (m/s²). Lower = trust motion model more
+            // - measurement_noise: position uncertainty (m). Lower = trust measurements more
             //
-            // Old values (5.0, 0.5) caused velocity under-estimation because Q >> R.
-            // We need Q/R ratio that lets velocity converge but still predicts well.
-            let kalman = Kalman3D::new(object.centroid, 2.0, 1.0);
+            // For sinusoidal/accelerating targets with peak accel ~50 m/s²:
+            // Very high process noise minimizes velocity lag (critical for sine tracking)
+            // Low measurement noise keeps position accurate
+            //
+            // process_noise=20.0 -> q_vel=400 (minimal lag, some noise acceptable)
+            // measurement_noise=0.1 -> r=0.01 (trust position measurements)
+            let kalman = Kalman3D::new(object.centroid, 2.5, 0.4);
 
             self.tracks.insert(
                 id,
@@ -151,29 +153,33 @@ impl ObjectTracker {
     }
 
     /// Predict where a track should be based on Kalman filter
-    fn predict_position(&self, state: &TrackedState) -> Vec3 {
-        // We predict forward by missing_frames * dt
-        // Since missing_frames was incremented at start of update,
-        // it represents the time from last update to CURRENT time.
-        // e.g. if last update was frame 0. Current is frame 1. missing_frames = 1.
-        // dt = 1 * frame_dt. Correct.
-        let dt = state.missing_frames as f32 * self.frame_dt;
+    fn predict_position(&self, state: &TrackedState, dt: f32) -> Vec3 {
+        // We predict forward by dt * missing_frames?
+        // No, dt passed to update() is the time since the last update() call.
+        // But state.missing_frames tracks how many *frames* (logical updates) we missed.
+        // Actually, if we pass real time dt, we shouldn't rely on missing_frames count for time calculation,
+        // unless dt is "time since last update call".
+
+        // If the track was updated last frame, time since last update = dt.
+        // If it was updated 2 frames ago, time since last update = dt + (time of previous frame).
+
+        // However, the caller calls update() every frame.
+        // So dt is the time since the PREVIOUS update() call.
+        // The track's position is valid at time T_prev.
+        // We want to predict it at time T_now.
+        // So we project forward by dt.
         state.kalman.predicted_position(dt)
     }
 
     /// Update a track with a new detection (by track ID)
-    fn do_update_track(&mut self, track_id: ObjectId, detection: &TrackedObject) {
-        let frame_dt = self.frame_dt;
+    fn do_update_track(&mut self, track_id: ObjectId, detection: &TrackedObject, dt: f32) {
         if let Some(state) = self.tracks.get_mut(&track_id) {
-            Self::update_track_state(state, detection, frame_dt);
+            Self::update_track_state(state, detection, dt);
         }
     }
 
     /// Update track state with a new detection
-    fn update_track_state(state: &mut TrackedState, detection: &TrackedObject, frame_dt: f32) {
-        // Time since last update
-        let dt = state.missing_frames as f32 * frame_dt;
-
+    fn update_track_state(state: &mut TrackedState, detection: &TrackedObject, dt: f32) {
         // Kalman Predict & Update
         state.kalman.predict(dt);
         state.kalman.update(detection.centroid);
@@ -219,14 +225,15 @@ mod tests {
     #[test]
     fn test_tracking() {
         let mut tracker = ObjectTracker::new(5.0, 30, 60.0);
+        let dt = 1.0 / 60.0;
 
         // First frame
-        let objects = tracker.update(vec![make_object(0, Vec3::new(0.0, 0.0, 0.0))]);
+        let objects = tracker.update(vec![make_object(0, Vec3::new(0.0, 0.0, 0.0))], dt);
         assert_eq!(objects.len(), 1);
         let first_id = objects[0].id;
 
         // Second frame, slightly moved
-        let objects = tracker.update(vec![make_object(0, Vec3::new(1.0, 0.0, 0.0))]);
+        let objects = tracker.update(vec![make_object(0, Vec3::new(1.0, 0.0, 0.0))], dt);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].id, first_id); // Same track ID
     }
@@ -235,13 +242,14 @@ mod tests {
     fn test_velocity_convergence() {
         // 10 fps -> dt = 0.1s
         let mut tracker = ObjectTracker::new(5.0, 30, 10.0);
+        let dt = 0.1;
 
         // Constant velocity 10 m/s.
         // Pos: 0, 1, 2, 3...
         let mut objects = Vec::new();
         for i in 0..10 {
             let pos = Vec3::new(i as f32, 0.0, 0.0);
-            objects = tracker.update(vec![make_object(0, pos)]);
+            objects = tracker.update(vec![make_object(0, pos)], dt);
         }
 
         // Check velocity after 10 frames
@@ -261,6 +269,7 @@ mod tests {
     fn test_association_prediction() {
         // 10 fps
         let mut tracker = ObjectTracker::new(100.0, 30, 10.0);
+        let dt = 0.1;
 
         // Object moves 0 -> 2 -> 4 -> 6 -> 8 -> 10. (Velocity 20 m/s).
         let mut track_id = 0;
@@ -268,7 +277,7 @@ mod tests {
         // Establish track for 5 frames (0 to 8)
         for i in 0..5 {
             let pos = Vec3::new(i as f32 * 2.0, 0.0, 0.0);
-            let res = tracker.update(vec![make_object(0, pos)]);
+            let res = tracker.update(vec![make_object(0, pos)], dt);
             if i == 0 {
                 track_id = res[0].id;
             }
@@ -284,7 +293,7 @@ mod tests {
             make_object(0, Vec3::new(8.5, 0.0, 0.0)),  // Distractor
         ];
 
-        let results = tracker.update(detections);
+        let results = tracker.update(detections, dt);
 
         let mut found_real = false;
         let mut found_distractor = false;

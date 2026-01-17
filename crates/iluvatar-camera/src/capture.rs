@@ -1,9 +1,11 @@
 use crate::arena::FrameArena;
+use glam::Vec3;
+use iluvatar_core::{CameraIntrinsics, CameraPose};
 use thiserror::Error;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "real"))]
 use v4l::io::mmap::Stream;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "real"))]
 use v4l::{
     Device,
     buffer::Type,
@@ -88,21 +90,24 @@ pub trait CameraCapture: Send {
     fn capture_grayscale<'a>(
         &mut self,
         arena: &'a FrameArena,
+        pose: &CameraPose,
     ) -> Result<GrayscaleFrame<&'a mut [u8]>, CaptureError>;
 }
 
-/// Dummy camera for testing
+/// Dummy camera for testing that simulates a 3D environment
 pub struct DummyCamera {
     width: u32,
     height: u32,
+    intrinsics: Option<CameraIntrinsics>,
     frame_count: u64,
 }
 
 impl DummyCamera {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u32, height: u32, intrinsics: Option<CameraIntrinsics>) -> Self {
         Self {
             width,
             height,
+            intrinsics,
             frame_count: 0,
         }
     }
@@ -116,25 +121,79 @@ impl CameraCapture for DummyCamera {
     fn capture_grayscale<'a>(
         &mut self,
         arena: &'a FrameArena,
+        pose: &CameraPose,
     ) -> Result<GrayscaleFrame<&'a mut [u8]>, CaptureError> {
         self.frame_count += 1;
         let mut frame = GrayscaleFrame::new_in(arena, self.width, self.height);
-
-        // Generate a simple moving pattern for testing
-        let offset = (self.frame_count % 100) as u32;
         let width = self.width;
         let height = self.height;
-
-        // Optimize loop to avoid boundary checks in set()
         let data = frame.pixels_mut();
-        for y in 0..height {
-            for x in 0..width {
-                let value = if (x + offset) % 50 < 25 && (y + offset) % 50 < 25 {
-                    200
-                } else {
-                    50
-                };
-                data[(y * width + x) as usize] = value;
+
+        // Clear frame
+        data.fill(0);
+
+        if let Some(intrinsics) = &self.intrinsics {
+            // Simulate a bouncing ball at (0, 0, Z)
+            // Bouncing height 0 to 2 meters. Period 2 seconds (120 frames)
+            let time = self.frame_count as f32 / 60.0;
+            let ball_height = (time * 5.0).sin().abs() * 2.0;
+
+            // Ball moves in a circle around origin
+            let ball_pos = Vec3::new(
+                (time * 0.5).cos() * 5.0,
+                (time * 0.5).sin() * 5.0,
+                ball_height,
+            );
+
+            // HACK: We assume pose.position stores (x, y, z) directly in (lat, lon, alt) for the DummyLocalizer
+            let cam_pos = Vec3::new(
+                pose.position.latitude as f32,
+                pose.position.longitude as f32,
+                pose.position.altitude as f32,
+            );
+
+            let p_local = pose.orientation.conjugate() * (ball_pos - cam_pos);
+
+            if p_local.z < -0.1 {
+                // In front of camera (Bevy camera looks down -Z)
+                let z = -p_local.z;
+                let x = p_local.x / z;
+                let y = p_local.y / z;
+
+                let u = intrinsics.focal_length.x * x + intrinsics.principal_point.x;
+                // Flip Y for image coordinates (assuming standard computer vision vs Bevy Y-up)
+                let v = intrinsics.principal_point.y - intrinsics.focal_length.y * y;
+
+                let radius = (50.0 / z) as i32; // Perspective scaling for radius
+
+                // Draw circle
+                let center_x = u as i32;
+                let center_y = v as i32;
+
+                let min_y = (center_y - radius).max(0);
+                let max_y = (center_y + radius).min(height as i32 - 1);
+                let min_x = (center_x - radius).max(0);
+                let max_x = (center_x + radius).min(width as i32 - 1);
+
+                for y in min_y..=max_y {
+                    for x in min_x..=max_x {
+                        let dx = x - center_x;
+                        let dy = y - center_y;
+                        if dx * dx + dy * dy <= radius * radius {
+                            data[(y as u32 * width + x as u32) as usize] = 255;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fallback to simple pattern
+            let offset = (self.frame_count % 100) as u32;
+            for y in 0..height {
+                for x in 0..width {
+                    if (x + offset) % 50 < 25 && (y + offset) % 50 < 25 {
+                        data[(y * width + x) as usize] = 200;
+                    }
+                }
             }
         }
 
@@ -144,7 +203,7 @@ impl CameraCapture for DummyCamera {
 
 /// Internal struct that holds the self-referential Device -> Stream relationship.
 /// Uses ouroboros to safely handle the lifetime dependency.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "real"))]
 #[ouroboros::self_referencing]
 struct V4L2CameraInner {
     /// The v4l2 device - must be boxed for address stability
@@ -156,7 +215,7 @@ struct V4L2CameraInner {
     stream: Stream<'this>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "real"))]
 pub struct V4L2Camera {
     inner: V4L2CameraInner,
     width: u32,
@@ -164,7 +223,7 @@ pub struct V4L2Camera {
     format: FourCC,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "real"))]
 impl V4L2Camera {
     pub fn new(path: &str, width: u32, height: u32) -> Result<Self, CaptureError> {
         let device =
@@ -223,7 +282,7 @@ impl V4L2Camera {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "real"))]
 impl CameraCapture for V4L2Camera {
     fn resolution(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -232,6 +291,7 @@ impl CameraCapture for V4L2Camera {
     fn capture_grayscale<'a>(
         &mut self,
         arena: &'a FrameArena,
+        _pose: &CameraPose,
     ) -> Result<GrayscaleFrame<&'a mut [u8]>, CaptureError> {
         let (buf, _meta) = self.inner.with_stream_mut(|stream| {
             stream
@@ -264,9 +324,12 @@ impl CameraCapture for V4L2Camera {
                     ));
                 }
 
-                // Vectorized copy could be better, but loop is simple for now
-                for (i, p) in target.iter_mut().enumerate() {
-                    *p = buf[i * 2];
+                // Optimized copy using iterators
+                // Each pixel corresponds to 2 bytes in YUYV stream (effective 16bpp, but shared chroma)
+                // We just want the Luma (Y) component which is the first byte of every 2-byte pair.
+                // chunks_exact(2) gives us [Y, C] pairs. We take Y.
+                for (chunk, pixel) in buf.chunks_exact(2).zip(target.iter_mut()) {
+                    *pixel = chunk[0];
                 }
             }
             // MJPEG

@@ -39,17 +39,18 @@ impl Kalman1D {
     /// * `process_noise` - Process noise (acceleration std dev, m/s²)
     /// * `measurement_noise` - Measurement noise (position std dev, m)
     pub fn new(initial_pos: f32, process_noise: f32, measurement_noise: f32) -> Self {
-        // Initial covariance: high uncertainty in velocity, low in position
+        // Initial covariance tuned for fast velocity convergence
+        // High p11 = uncertain about initial velocity (will learn quickly)
+        // High p01/p10 = position info transfers strongly to velocity estimate
         Self {
             x: initial_pos,
             v: 0.0,
-            // Initial P: position well-known, velocity unknown
-            p00: measurement_noise * measurement_noise,
-            p01: 0.0,
-            p10: 0.0,
-            p11: 100.0, // High initial velocity uncertainty (10 m/s std dev)
-            q_pos: process_noise * process_noise * 0.25, // Position process noise
-            q_vel: process_noise * process_noise, // Velocity process noise
+            p00: 4.0,    // 2m position std dev initially
+            p01: 50.0,   // High cross-covariance for fast velocity learning
+            p10: 50.0,   // Symmetric
+            p11: 2500.0, // 50 m/s velocity std dev initially
+            q_pos: process_noise * process_noise * 0.25,
+            q_vel: process_noise * process_noise,
             r: measurement_noise * measurement_noise,
         }
     }

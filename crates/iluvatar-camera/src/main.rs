@@ -133,7 +133,7 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
         let pose = localizer.get_pose()?;
 
         // Capture frame
-        let grayscale = camera.capture_grayscale(&arena)?;
+        let grayscale = camera.capture_grayscale(&arena, &pose)?;
 
         // Compute difference mask
         if let Some(mask) = processor.compute_difference(&grayscale, &arena) {
@@ -203,7 +203,7 @@ fn create_camera(config: &CameraConfig) -> Box<dyn CameraCapture> {
     let device = &config.hardware.device;
 
     if device.starts_with("/dev/video") {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "real"))]
         {
             match iluvatar_camera::capture::V4L2Camera::new(device, width, height) {
                 Ok(cam) => {
@@ -221,13 +221,19 @@ fn create_camera(config: &CameraConfig) -> Box<dyn CameraCapture> {
                 }
             }
         }
-        #[cfg(not(target_os = "linux"))]
-        warn!("V4L2 not supported on this platform. Using dummy camera.");
+        #[cfg(not(all(target_os = "linux", feature = "real")))]
+        warn!(
+            "V4L2 not supported on this platform or 'real' feature disabled. Using dummy camera."
+        );
     } else {
         info!("Using dummy camera as requested (device: {})", device);
     }
 
-    Box::new(DummyCamera::new(width, height))
+    Box::new(DummyCamera::new(
+        width,
+        height,
+        Some(config.to_intrinsics()),
+    ))
 }
 
 fn create_localizer(config: &CameraConfig) -> Box<dyn Localizer> {

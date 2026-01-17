@@ -21,6 +21,7 @@ tracing-subscriber = { workspace = true }
 smol = { workspace = true }
 async-channel = { workspace = true }
 futures-lite = { workspace = true }
+futures = "0.3"
 quinn = { workspace = true }
 rustls = { workspace = true }
 
