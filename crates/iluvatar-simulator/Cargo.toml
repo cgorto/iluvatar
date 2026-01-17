@@ -25,3 +25,4 @@ bevy = {version = "0.18", features = ["free_camera"]}
 # Configuration
 toml = "0.8"
 crossbeam-channel = "0.5.15"
+bevy_egui = "0.39.0"

@@ -61,23 +61,27 @@ impl Raymarcher {
         let (nx, ny) = self.pixel_to_ndc(x, y);
 
         // Direction in camera space using pinhole camera model
-        // Based on: focal_length = (width/2) / tan(FOV/2)
+        // Bevy cameras look down -Z, so we use -1.0 for the forward direction
         let dir_camera = Vec3::new(
             nx * (self.intrinsics.fov.horizontal / 2.0).tan(),
             -ny * (self.intrinsics.fov.vertical / 2.0).tan(),
-            1.0,
+            -1.0, // Bevy cameras look down -Z
         )
         .normalize();
 
-        // Transform to world space
-        let dir_world = pose.orientation * dir_camera;
+        // Transform to Bevy world space
+        let dir_bevy = pose.orientation * dir_camera;
 
-        // Camera position in local grid coordinates
+        // Convert direction from Bevy (Y-up) to ENU (Z-up)
+        // Bevy: X=right, Y=up, Z=back → ENU: X=East, Y=North, Z=Up
+        let dir_enu = Vec3::new(dir_bevy.x, dir_bevy.z, dir_bevy.y);
+
+        // Camera position in local grid coordinates (already in ENU via to_local_enu)
         let origin = pose.position.to_local_enu(&self.world_origin);
 
         Ray {
             origin,
-            direction: dir_world.normalize(),
+            direction: dir_enu.normalize(),
             intensity,
         }
     }
