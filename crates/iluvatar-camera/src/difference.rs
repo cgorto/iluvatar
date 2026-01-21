@@ -41,21 +41,21 @@ where
     /// Filter out isolated pixels (noise)
     /// Performs a single pass of erosion: pixels must have at least `min_neighbors` active neighbors
     /// (out of 8) to survive.
-    pub fn filter_noise(&mut self, min_neighbors: u8)
+    ///
+    /// The `buffer` parameter is a pre-allocated Vec that will be cleared and reused to avoid
+    /// per-frame heap allocations.
+    pub fn filter_noise(&mut self, min_neighbors: u8, buffer: &mut Vec<usize>)
     where
         S: AsMut<[u8]> + AsRef<[u8]>,
     {
-        // We need a copy of the data to check neighbors while modifying
-        // Since S is generic, we can't easily clone it if it's &mut [u8].
-        // But wait, the mask is usually created as &mut [u8] in the arena.
-        // We can't clone &mut [u8].
-        // We can create a temporary bitset or vector.
+        // Clear and reuse the provided buffer instead of allocating
+        buffer.clear();
+
         let width = self.width;
         let height = self.height;
-        // Scope for immutable borrow
-        let to_clear = {
+
+        {
             let data = self.data.as_ref();
-            let mut to_clear = Vec::new();
 
             for y in 0..height {
                 for x in 0..width {
@@ -80,16 +80,15 @@ where
                         }
 
                         if neighbors < min_neighbors {
-                            to_clear.push(idx);
+                            buffer.push(idx);
                         }
                     }
                 }
             }
-            to_clear
-        };
+        }
 
         let data_mut = self.data.as_mut();
-        for idx in to_clear {
+        for &idx in buffer.iter() {
             data_mut[idx] = 0;
         }
     }
@@ -130,6 +129,8 @@ pub struct FrameProcessor {
     previous_frame: Option<GrayscaleFrame<Vec<u8>>>,
     threshold: u8,
     min_neighbors: u8,
+    /// Pre-allocated buffer for noise filtering to avoid per-frame allocations
+    noise_filter_buffer: Vec<usize>,
 }
 
 impl FrameProcessor {
@@ -138,6 +139,7 @@ impl FrameProcessor {
             previous_frame: None,
             threshold,
             min_neighbors: 2, // Default to requiring 2 neighbors
+            noise_filter_buffer: Vec::new(),
         }
     }
 
@@ -179,7 +181,7 @@ impl FrameProcessor {
                 }
 
                 if self.min_neighbors > 0 {
-                    mask.filter_noise(self.min_neighbors);
+                    mask.filter_noise(self.min_neighbors, &mut self.noise_filter_buffer);
                 }
 
                 Some(mask)

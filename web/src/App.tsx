@@ -1,156 +1,136 @@
-import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls, Text, Line, Float } from '@react-three/drei';
-import { EffectComposer, Bloom, Noise, Vignette, Scanline } from '@react-three/postprocessing';
-import { BlendFunction } from 'postprocessing';
-import { useMemo, useRef } from 'react';
-import * as THREE from 'three';
+import React, { useEffect, useState, useRef } from 'react'
+import { Canvas, useFrame } from '@react-three/fiber'
+import * as THREE from 'three'
 
-import { useStore } from './store';
-import { type TrackedObject } from './lib/protocol';
-import { ConcreteGridMaterial } from './materials/ConcreteGridMaterial';
-import { Dither, CRT } from './effects';
+// Types
+interface TrackedObject {
+  id: number
+  position: { x: number; y: number; z: number }
+}
 
-// Ensure the material is registered
-console.log(ConcreteGridMaterial);
-
-const TrackedEntity = ({ object }: { object: TrackedObject }) => {
-  // Coordinate transform:
-  // R3F X = ENU X
-  // R3F Y = ENU Z (Height)
-  // R3F Z = -ENU Y (North goes into screen)
-  const position = useMemo(() => 
-    [object.centroid.x, object.centroid.z, -object.centroid.y] as [number, number, number], 
-    [object.centroid]
-  );
+// Ghost component - renders a single tracked object
+function Ghost({ position }: { position: { x: number; y: number; z: number } }) {
+  const meshRef = useRef<THREE.Mesh>(null)
   
-  const points = useMemo(() => [
-      new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(0, -object.centroid.z, 0) // Drop line to floor
-  ], [object.centroid.z]);
-
-  return (
-    <group position={position}>
-      {/* The Object Marker - Wireframe Cube */}
-      <mesh>
-        <boxGeometry args={[0.4, 0.4, 0.4]} />
-        <meshBasicMaterial color="#ffb000" wireframe />
-      </mesh>
-      
-      {/* Inner solid core */}
-      <mesh>
-        <boxGeometry args={[0.2, 0.2, 0.2]} />
-        <meshBasicMaterial color="#ffb000" />
-      </mesh>
-
-      {/* Label */}
-      <Text 
-        position={[0.5, 0.5, 0]} 
-        fontSize={0.3} 
-        color="#ffb000"
-        anchorX="left"
-        font="https://fonts.gstatic.com/s/sharetechmono/v15/J7aHnp1uDWRCCytEsefQwNM3.woff"
-      >
-        ID:{object.id.toString()}
-      </Text>
-
-      {/* Height Line */}
-      <Line points={points} color="#5c4000" lineWidth={1} />
-    </group>
-  );
-};
-
-const Scene = () => {
-  const { objects, connect, connected } = useStore(state => ({
-    objects: state.objects,
-    connect: state.connect,
-    connected: state.connected
-  }));
-
-  const objectList = Array.from(objects.values());
-  const materialRef = useRef<any>(null);
-
-  // Connect on mount
-  useMemo(() => {
-    connect();
-  }, [connect]);
-
-  useFrame((state) => {
-    if (materialRef.current) {
-      materialRef.current.time = state.clock.elapsedTime;
+  useFrame(() => {
+    if (meshRef.current) {
+      meshRef.current.rotation.y += 0.01
+      meshRef.current.rotation.x += 0.005
     }
-  });
+  })
+  
+  return (
+    <mesh ref={meshRef} position={[position.x, position.z, position.y]}>
+      <octahedronGeometry args={[2, 0]} />
+      <meshBasicMaterial color="#00ff88" wireframe />
+    </mesh>
+  )
+}
 
+// Grid floor
+function Grid() {
+  return (
+    <gridHelper args={[200, 40, '#333333', '#222222']} />
+  )
+}
+
+// Main App
+export default function App() {
+  const [objects, setObjects] = useState<Map<number, TrackedObject>>(new Map())
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
+  
+  useEffect(() => {
+    console.log('[WS] Connecting to ws://localhost:8080...')
+    const ws = new WebSocket('ws://localhost:8080')
+    
+    ws.onopen = () => {
+      console.log('[WS] Connected!')
+      setStatus('connected')
+    }
+    
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        
+        // Handle the Update envelope
+        const update = data.Update || data.Snapshot || data
+        if (update.objects) {
+          setObjects(prev => {
+            const next = new Map(prev)
+            for (const obj of update.objects) {
+              // Parse centroid - could be array [x,y,z] or object {x,y,z}
+              let pos: { x: number; y: number; z: number }
+              if (Array.isArray(obj.centroid)) {
+                pos = { x: obj.centroid[0], y: obj.centroid[1], z: obj.centroid[2] }
+              } else if (obj.centroid) {
+                pos = obj.centroid
+              } else if (obj.position) {
+                pos = obj.position
+              } else {
+                console.warn('[WS] Object has no position:', obj)
+                continue
+              }
+              
+              next.set(obj.id, { id: obj.id, position: pos })
+            }
+            return next
+          })
+        }
+      } catch (e) {
+        console.error('[WS] Parse error:', e)
+      }
+    }
+    
+    ws.onerror = (e) => {
+      console.error('[WS] Error:', e)
+      setStatus('disconnected')
+    }
+    
+    ws.onclose = () => {
+      console.log('[WS] Disconnected')
+      setStatus('disconnected')
+    }
+    
+    return () => ws.close()
+  }, [])
+  
+  const objectList = Array.from(objects.values())
+  
   return (
     <>
-      <color attach="background" args={['#050505']} />
+      {/* Status overlay */}
+      <div style={{
+        position: 'absolute',
+        top: 20,
+        left: 20,
+        color: status === 'connected' ? '#00ff88' : '#ff4444',
+        fontFamily: 'monospace',
+        fontSize: 14,
+        zIndex: 1000,
+        textShadow: '0 0 10px currentColor',
+      }}>
+        :: {status.toUpperCase()} :: {objectList.length} OBJECTS
+      </div>
       
-      <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.1} />
-      
-      <ambientLight intensity={0.5} />
-      <pointLight position={[10, 10, 10]} intensity={1} />
-
-      {/* The Concrete Floor */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]}>
-        <planeGeometry args={[100, 100]} />
-        <concreteGridMaterial 
-          ref={materialRef} 
-          gridScale={20.0} 
-          concreteColor={new THREE.Color('#1a1a1a')} 
-          gridColor={new THREE.Color('#3a3a3a')} 
-        />
-      </mesh>
-
-      {/* Render Tracked Objects */}
-      {objectList.map(obj => (
-        <TrackedEntity key={obj.id.toString()} object={obj} />
-      ))}
-
-      {/* Status Text */}
-      <Float speed={1} floatIntensity={0.2}>
-         <Text 
-            position={[0, 4, -5]} 
-            fontSize={1} 
-            color="#dddddd"
-            font="https://fonts.gstatic.com/s/jetbrainsmono/v18/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0Pn5.woff"
-        >
-            ILUVATAR_SYS
-        </Text>
-        <Text 
-            position={[0, 3.2, -5]} 
-            fontSize={0.3} 
-            color={connected ? "#00ff00" : "#ff0000"}
-            font="https://fonts.gstatic.com/s/jetbrainsmono/v18/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0Pn5.woff"
-        >
-            [{connected ? "LINK ESTABLISHED" : "SIGNAL LOST"}]
-        </Text>
-      </Float>
-
-      {/* Post-Processing Pipeline */}
-      <EffectComposer>
-        {/* Agent 1 Effects */}
-        <Bloom 
-          luminanceThreshold={0.2} 
-          mipmapBlur 
-          intensity={1.5} 
-          radius={0.6}
-        />
-        <Noise opacity={0.15} blendFunction={BlendFunction.OVERLAY} />
-        <Vignette eskil={false} offset={0.1} darkness={1.1} />
+      {/* 3D Scene */}
+      <Canvas
+        camera={{ position: [100, 80, 100], fov: 50, far: 2000 }}
+        style={{ background: '#0a0a0a' }}
+      >
+        <ambientLight intensity={0.5} />
+        <Grid />
         
-        {/* Agent 2 Effects */}
-        <Dither scale={1.0} />
-        <CRT curvature={0.2} aberration={0.8} vignette={1.2} />
-      </EffectComposer>
-    </>
-  );
-};
-
-export default function App() {
-  return (
-    <div style={{ width: '100vw', height: '100vh', background: '#000' }}>
-      <Canvas camera={{ position: [0, 5, 10], fov: 45 }}>
-        <Scene />
+        {/* Render all tracked objects */}
+        {objectList.map(obj => (
+          <Ghost key={obj.id} position={obj.position} />
+        ))}
+        
+        {/* Origin marker */}
+        <mesh position={[0, 0, 0]}>
+          <sphereGeometry args={[1, 8, 8]} />
+          <meshBasicMaterial color="#ff0000" wireframe />
+        </mesh>
       </Canvas>
-    </div>
-  );
+    </>
+  )
 }

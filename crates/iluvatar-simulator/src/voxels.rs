@@ -20,6 +20,7 @@ use iluvatar_server::grid::SparseVoxelGrid;
 use iluvatar_server::time::Clock;
 
 use crate::camera::CaptureCamera;
+use crate::render_camera::RenderCamera;
 use crate::targets::Target;
 
 pub struct VoxelsPlugin;
@@ -35,6 +36,26 @@ impl Plugin for VoxelsPlugin {
                     decay_voxels,
                     visualize_voxels,
                     print_stats,
+                )
+                    .chain(),
+            );
+    }
+}
+
+/// Voxel plugin variant that doesn't include the project_and_raymarch system.
+/// Used when render cameras provide motion-based raymarching instead.
+pub struct VoxelsPluginWithoutRaymarch;
+
+impl Plugin for VoxelsPluginWithoutRaymarch {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<VoxelGridResource>()
+            .init_resource::<SimulatorConfig>()
+            .add_systems(
+                Update,
+                (
+                    decay_voxels,
+                    visualize_voxels_render_mode,
+                    print_stats_render_mode,
                 )
                     .chain(),
             );
@@ -64,11 +85,11 @@ impl Default for SimulatorConfig {
     fn default() -> Self {
         Self {
             voxel_size: 2.0,
-            grid_dimensions: UVec3::new(100, 40, 100), // 200m x 80m x 200m at 2m voxels
-            grid_origin: Vec3::new(-100.0, 0.0, -100.0),
+            grid_dimensions: UVec3::new(500, 250, 500), // 1000m x 500m x 1000m at 2m voxels
+            grid_origin: Vec3::new(-500.0, 0.0, -500.0),
             decay_rate: 5.0,
-            max_ray_distance: 300.0,
-            ray_intensity: 10.0,
+            max_ray_distance: 3000.0,
+            ray_intensity: 1.0,
             visualization_threshold: 1.0,
         }
     }
@@ -115,9 +136,10 @@ impl FromWorld for VoxelGridResource {
         let config = RaymarchConfig {
             max_distance: sim_config.max_ray_distance,
             step_size: 0.5, // Unused by DDA but kept for API compat
-            attenuation: AttenuationConfig::Linear {
-                max_distance: sim_config.max_ray_distance,
-            },
+            attenuation: AttenuationConfig::None,
+            // {
+            //     max_distance: sim_config.max_ray_distance,
+            // },
         };
 
         Self {
@@ -312,11 +334,7 @@ pub fn project_and_raymarch(
                 let ray_origin = cam_transform.translation;
 
                 // Create a proper Ray struct from iluvatar-core
-                let ray = Ray {
-                    origin: ray_origin,
-                    direction: ray_dir,
-                    intensity: ray_intensity,
-                };
+                let ray = Ray::new(ray_origin, ray_dir, ray_intensity);
 
                 // March the ray using 3D-DDA
                 raymarcher.march_ray(&ray, grid_dims, &mut contributions);
@@ -344,7 +362,7 @@ pub fn project_and_raymarch(
 }
 
 /// Decay voxels over time using the real grid's decay mechanism
-fn decay_voxels(grid_res: Res<VoxelGridResource>) {
+pub fn decay_voxels(grid_res: Res<VoxelGridResource>) {
     // The real SparseVoxelGrid handles time-based decay internally
     grid_res.grid.apply_decay();
 }
@@ -361,6 +379,17 @@ fn visualize_voxels(
     let show_voxels = vis_config.as_ref().is_none_or(|c| c.show_voxels);
     let show_cameras = vis_config.as_ref().is_none_or(|c| c.show_cameras);
     let show_targets = vis_config.as_ref().is_none_or(|c| c.show_targets);
+    let show_grid_bounds = vis_config.as_ref().is_none_or(|c| c.show_grid_bounds);
+
+    // Draw grid bounds
+    if show_grid_bounds {
+        let center = (grid_res.bounds.min + grid_res.bounds.max) * 0.5;
+        let size = grid_res.bounds.max - grid_res.bounds.min;
+        gizmos.cube(
+            Transform::from_translation(center).with_scale(size),
+            Color::WHITE,
+        );
+    }
 
     // Get voxels for visualization from the real grid
     if show_voxels {
@@ -444,6 +473,139 @@ fn print_stats(
             "Active voxels: {} | Cameras: {}",
             grid_res.grid.active_count(),
             camera_count
+        );
+        println!(
+            "Rays cast: {}, voxels contributed: {}",
+            grid_res.rays_cast, grid_res.voxels_contributed
+        );
+
+        for (transform, target, path) in targets.iter() {
+            let pos = transform.translation;
+            let vel = path.current_velocity(now);
+            println!(
+                "Target {}: pos=({:.1}, {:.1}, {:.1}) vel=({:.1}, {:.1}, {:.1}) |v|={:.1}m/s",
+                target.id,
+                pos.x,
+                pos.y,
+                pos.z,
+                vel.x,
+                vel.y,
+                vel.z,
+                vel.length()
+            );
+        }
+    }
+}
+
+/// Visualize voxels with gizmos (render mode - uses RenderCamera)
+fn visualize_voxels_render_mode(
+    mut gizmos: Gizmos,
+    grid_res: Res<VoxelGridResource>,
+    sim_config: Res<SimulatorConfig>,
+    vis_config: Option<Res<crate::debug_ui::VisualizationConfig>>,
+    cameras: Query<&Transform, With<RenderCamera>>,
+    targets: Query<&Transform, With<Target>>,
+) {
+    let show_voxels = vis_config.as_ref().is_none_or(|c| c.show_voxels);
+    let show_cameras = vis_config.as_ref().is_none_or(|c| c.show_cameras);
+    let show_targets = vis_config.as_ref().is_none_or(|c| c.show_targets);
+    let show_grid_bounds = vis_config.as_ref().is_none_or(|c| c.show_grid_bounds);
+
+    // Draw grid bounds
+    if show_grid_bounds {
+        let center = (grid_res.bounds.min + grid_res.bounds.max) * 0.5;
+        let size = grid_res.bounds.max - grid_res.bounds.min;
+        gizmos.cube(
+            Transform::from_translation(center).with_scale(size),
+            Color::WHITE,
+        );
+    }
+
+    // Get voxels for visualization from the real grid
+    if show_voxels {
+        let max_intensity = grid_res.grid.max_intensity().max(1.0);
+
+        // Use the grid's visualization iterator
+        let voxels = grid_res.grid.iter_voxels_for_visualization(
+            sim_config.visualization_threshold,
+            10000, // Max voxels to render
+        );
+
+        for (world_pos, intensity, camera_count) in voxels {
+            // Adjust position for grid origin (real grid uses 0-based coordinates)
+            let pos = world_pos + sim_config.grid_origin;
+            let t = (intensity / max_intensity).clamp(0.0, 1.0);
+
+            // Color based on intensity AND camera count
+            // Multi-camera contributions get brighter/warmer colors
+            let color = if camera_count >= 2 {
+                // Hot colors for multi-camera consensus (the good stuff!)
+                Color::srgb(1.0, 1.0 - t * 0.5, 0.0)
+            } else if t < 0.5 {
+                // Cool colors for single-camera, low intensity
+                Color::srgb(t * 2.0, t * 2.0, 1.0 - t * 2.0)
+            } else {
+                // Warm colors for single-camera, high intensity
+                Color::srgb(1.0, 2.0 - t * 2.0, 0.0)
+            };
+
+            gizmos.cube(
+                Transform::from_translation(pos)
+                    .with_scale(Vec3::splat(sim_config.voxel_size * 0.8)),
+                color,
+            );
+        }
+    }
+
+    // Draw camera frustum outline
+    if show_cameras {
+        for cam_transform in cameras.iter() {
+            let forward = cam_transform.forward() * 50.0;
+            let pos = cam_transform.translation;
+
+            gizmos.line(pos, pos + forward, Color::srgb(0.0, 1.0, 0.0));
+            gizmos.sphere(
+                Isometry3d::from_translation(pos),
+                2.0,
+                Color::srgb(0.5, 0.2, 0.8),
+            );
+        }
+    }
+
+    // Draw target positions
+    if show_targets {
+        for target_transform in targets.iter() {
+            gizmos.sphere(
+                Isometry3d::from_translation(target_transform.translation),
+                4.0,
+                Color::srgb(0.0, 1.0, 0.0),
+            );
+        }
+    }
+}
+
+/// Print stats periodically (render mode - uses RenderCamera)
+fn print_stats_render_mode(
+    time: Res<Time>,
+    grid_res: Res<VoxelGridResource>,
+    cameras: Query<&RenderCamera>,
+    gpu_metrics: Option<Res<crate::gpu_pipeline::GpuPipelineMetrics>>,
+    targets: Query<(&Transform, &Target, &crate::targets::TargetPath)>,
+    mut last_print: Local<f32>,
+) {
+    let now = time.elapsed_secs();
+    if now - *last_print > 1.0 {
+        *last_print = now;
+
+        let camera_count = cameras.iter().count();
+        let total_rays = gpu_metrics.as_ref().map(|m| m.ray_count).unwrap_or(0);
+
+        println!("\n=== t={:.1}s ===", now);
+        println!(
+            "Active voxels: {} | Cameras: {} | GPU rays: {}",
+            grid_res.grid.active_count(),
+            camera_count,
+            total_rays
         );
         println!(
             "Rays cast: {}, voxels contributed: {}",

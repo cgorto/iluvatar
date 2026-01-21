@@ -1,18 +1,125 @@
 use glam::{DMat3, DVec3, Vec3};
 
 use crate::GeoPosition;
+use crate::types::{GeoValidationError, MAX_ALTITUDE_M, MIN_ALTITUDE_M};
 
 const WGS84_A: f64 = 6378137.0;
 const WGS84_B: f64 = 6356752.314245;
 const WGS84_E_SQ: f64 = 1.0 - (WGS84_B * WGS84_B) / (WGS84_A * WGS84_A);
 
 impl GeoPosition {
+    /// Creates a new `GeoPosition` without validation.
+    ///
+    /// # Warning
+    /// This constructor does NOT validate the input coordinates. Invalid values
+    /// (latitude outside [-90, 90], longitude outside [-180, 180], NaN, or infinity)
+    /// will cause garbage output from coordinate conversion methods like `to_ecef()`.
+    ///
+    /// For untrusted input (e.g., GPS data from external sources), use
+    /// [`new_checked`](Self::new_checked) instead.
     pub fn new(latitude: f64, longitude: f64, altitude: f64) -> Self {
         Self {
             latitude,
             longitude,
             altitude,
         }
+    }
+
+    /// Creates a new `GeoPosition` with full validation.
+    ///
+    /// Validates that:
+    /// - Latitude is in [-90, 90] degrees
+    /// - Longitude is in [-180, 180] degrees
+    /// - Altitude is in [-500m, 100km] (Dead Sea to Kármán line)
+    /// - All values are finite (not NaN or infinity)
+    ///
+    /// Use this constructor for untrusted input such as GPS data from external
+    /// sources in a distributed system.
+    ///
+    /// # Errors
+    /// Returns [`GeoValidationError`] if any coordinate is invalid.
+    ///
+    /// # Example
+    /// ```
+    /// use iluvatar_core::GeoPosition;
+    ///
+    /// // Valid position
+    /// let pos = GeoPosition::new_checked(47.6062, -122.3321, 100.0).unwrap();
+    ///
+    /// // Invalid latitude
+    /// let err = GeoPosition::new_checked(200.0, 0.0, 0.0);
+    /// assert!(err.is_err());
+    /// ```
+    pub fn new_checked(
+        latitude: f64,
+        longitude: f64,
+        altitude: f64,
+    ) -> Result<Self, GeoValidationError> {
+        // Check for NaN/infinity first (these would pass range checks)
+        if !latitude.is_finite() {
+            return Err(GeoValidationError::LatitudeNotFinite(latitude));
+        }
+        if !longitude.is_finite() {
+            return Err(GeoValidationError::LongitudeNotFinite(longitude));
+        }
+        if !altitude.is_finite() {
+            return Err(GeoValidationError::AltitudeNotFinite(altitude));
+        }
+
+        // Range checks
+        if !(-90.0..=90.0).contains(&latitude) {
+            return Err(GeoValidationError::LatitudeOutOfRange(latitude));
+        }
+        if !(-180.0..=180.0).contains(&longitude) {
+            return Err(GeoValidationError::LongitudeOutOfRange(longitude));
+        }
+        if !(MIN_ALTITUDE_M..=MAX_ALTITUDE_M).contains(&altitude) {
+            return Err(GeoValidationError::AltitudeOutOfRange(altitude));
+        }
+
+        Ok(Self {
+            latitude,
+            longitude,
+            altitude,
+        })
+    }
+
+    /// Creates a new `GeoPosition` with validation, but without altitude bounds checking.
+    ///
+    /// This is useful when you need to validate lat/lon but the altitude may be
+    /// outside Earth's typical range (e.g., satellite positions, simulation data).
+    ///
+    /// Validates that:
+    /// - Latitude is in [-90, 90] degrees
+    /// - Longitude is in [-180, 180] degrees
+    /// - All values are finite (not NaN or infinity)
+    pub fn new_checked_unbounded_altitude(
+        latitude: f64,
+        longitude: f64,
+        altitude: f64,
+    ) -> Result<Self, GeoValidationError> {
+        if !latitude.is_finite() {
+            return Err(GeoValidationError::LatitudeNotFinite(latitude));
+        }
+        if !longitude.is_finite() {
+            return Err(GeoValidationError::LongitudeNotFinite(longitude));
+        }
+        if !altitude.is_finite() {
+            return Err(GeoValidationError::AltitudeNotFinite(altitude));
+        }
+
+        if !(-90.0..=90.0).contains(&latitude) {
+            return Err(GeoValidationError::LatitudeOutOfRange(latitude));
+        }
+        if !(-180.0..=180.0).contains(&longitude) {
+            return Err(GeoValidationError::LongitudeOutOfRange(longitude));
+        }
+
+        Ok(Self {
+            latitude,
+            longitude,
+            altitude,
+        })
     }
 
     pub fn to_ecef(&self) -> DVec3 {
@@ -142,25 +249,27 @@ fn enu_rotation_matrix(origin: &GeoPosition) -> DMat3 {
 #[derive(Debug, Clone)]
 pub struct LocalCoordinateSystem {
     pub origin: GeoPosition,
+    origin_ecef: DVec3,
     rotation: DMat3,
     rotation_inv: DMat3,
 }
 
 impl LocalCoordinateSystem {
     pub fn new(origin: GeoPosition) -> Self {
+        let origin_ecef = origin.to_ecef();
         let rotation = enu_rotation_matrix(&origin);
         let rotation_inv = rotation.transpose();
         Self {
             origin,
+            origin_ecef,
             rotation,
             rotation_inv,
         }
     }
 
     pub fn geo_to_local(&self, pos: &GeoPosition) -> Vec3 {
-        let origin_ecef = self.origin.to_ecef();
         let point_ecef = pos.to_ecef();
-        let diff = point_ecef - origin_ecef;
+        let diff = point_ecef - self.origin_ecef;
         let local = self.rotation * diff;
         Vec3::new(local.x as f32, local.y as f32, local.z as f32)
     }
@@ -168,8 +277,7 @@ impl LocalCoordinateSystem {
     pub fn local_to_geo(&self, local: Vec3) -> GeoPosition {
         let local_dvec = DVec3::new(local.x as f64, local.y as f64, local.z as f64);
         let diff = self.rotation_inv * local_dvec;
-        let origin_ecef = self.origin.to_ecef();
-        let point_ecef = origin_ecef + diff;
+        let point_ecef = self.origin_ecef + diff;
         GeoPosition::from_ecef(point_ecef)
     }
 }
@@ -347,5 +455,183 @@ mod tests {
                 back.altitude
             );
         }
+    }
+
+    #[test]
+    fn test_new_checked_valid_positions() {
+        // Boundary values that should be valid
+        let valid_cases = [
+            (0.0, 0.0, 0.0),             // Origin
+            (90.0, 0.0, 0.0),            // North pole
+            (-90.0, 0.0, 0.0),           // South pole
+            (0.0, 180.0, 0.0),           // Date line (positive)
+            (0.0, -180.0, 0.0),          // Date line (negative)
+            (47.6062, -122.3321, 100.0), // Seattle
+            (-33.8688, 151.2093, 58.0),  // Sydney
+            (0.0, 0.0, -500.0),          // Minimum altitude (Dead Sea depth)
+            (0.0, 0.0, 100_000.0),       // Maximum altitude (Kármán line)
+        ];
+
+        for (lat, lon, alt) in valid_cases {
+            let result = GeoPosition::new_checked(lat, lon, alt);
+            assert!(
+                result.is_ok(),
+                "Expected ({}, {}, {}) to be valid, got {:?}",
+                lat,
+                lon,
+                alt,
+                result.err()
+            );
+            let pos = result.unwrap();
+            assert_eq!(pos.latitude, lat);
+            assert_eq!(pos.longitude, lon);
+            assert_eq!(pos.altitude, alt);
+        }
+    }
+
+    #[test]
+    fn test_new_checked_latitude_out_of_range() {
+        let invalid_latitudes = [90.1, -90.1, 91.0, -91.0, 180.0, 200.0, -200.0];
+        for lat in invalid_latitudes {
+            let result = GeoPosition::new_checked(lat, 0.0, 0.0);
+            assert!(
+                matches!(result, Err(GeoValidationError::LatitudeOutOfRange(v)) if v == lat),
+                "Expected LatitudeOutOfRange for lat={}, got {:?}",
+                lat,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_checked_longitude_out_of_range() {
+        let invalid_longitudes = [180.1, -180.1, 181.0, -181.0, 360.0, -360.0];
+        for lon in invalid_longitudes {
+            let result = GeoPosition::new_checked(0.0, lon, 0.0);
+            assert!(
+                matches!(result, Err(GeoValidationError::LongitudeOutOfRange(v)) if v == lon),
+                "Expected LongitudeOutOfRange for lon={}, got {:?}",
+                lon,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_checked_altitude_out_of_range() {
+        let invalid_altitudes = [-500.1, -1000.0, 100_000.1, 200_000.0];
+        for alt in invalid_altitudes {
+            let result = GeoPosition::new_checked(0.0, 0.0, alt);
+            assert!(
+                matches!(result, Err(GeoValidationError::AltitudeOutOfRange(v)) if v == alt),
+                "Expected AltitudeOutOfRange for alt={}, got {:?}",
+                alt,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_checked_nan_values() {
+        // NaN latitude
+        let result = GeoPosition::new_checked(f64::NAN, 0.0, 0.0);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::LatitudeNotFinite(_))
+        ));
+
+        // NaN longitude
+        let result = GeoPosition::new_checked(0.0, f64::NAN, 0.0);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::LongitudeNotFinite(_))
+        ));
+
+        // NaN altitude
+        let result = GeoPosition::new_checked(0.0, 0.0, f64::NAN);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::AltitudeNotFinite(_))
+        ));
+    }
+
+    #[test]
+    fn test_new_checked_infinity_values() {
+        // Positive infinity
+        let result = GeoPosition::new_checked(f64::INFINITY, 0.0, 0.0);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::LatitudeNotFinite(_))
+        ));
+
+        let result = GeoPosition::new_checked(0.0, f64::INFINITY, 0.0);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::LongitudeNotFinite(_))
+        ));
+
+        let result = GeoPosition::new_checked(0.0, 0.0, f64::INFINITY);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::AltitudeNotFinite(_))
+        ));
+
+        // Negative infinity
+        let result = GeoPosition::new_checked(f64::NEG_INFINITY, 0.0, 0.0);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::LatitudeNotFinite(_))
+        ));
+
+        let result = GeoPosition::new_checked(0.0, f64::NEG_INFINITY, 0.0);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::LongitudeNotFinite(_))
+        ));
+
+        let result = GeoPosition::new_checked(0.0, 0.0, f64::NEG_INFINITY);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::AltitudeNotFinite(_))
+        ));
+    }
+
+    #[test]
+    fn test_new_checked_unbounded_altitude() {
+        // Should accept altitudes outside normal bounds
+        let result = GeoPosition::new_checked_unbounded_altitude(0.0, 0.0, 500_000.0);
+        assert!(result.is_ok());
+
+        let result = GeoPosition::new_checked_unbounded_altitude(0.0, 0.0, -10_000.0);
+        assert!(result.is_ok());
+
+        // Should still reject NaN/infinity
+        let result = GeoPosition::new_checked_unbounded_altitude(0.0, 0.0, f64::NAN);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::AltitudeNotFinite(_))
+        ));
+
+        // Should still reject invalid lat/lon
+        let result = GeoPosition::new_checked_unbounded_altitude(200.0, 0.0, 0.0);
+        assert!(matches!(
+            result,
+            Err(GeoValidationError::LatitudeOutOfRange(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_error_display() {
+        let err = GeoValidationError::LatitudeOutOfRange(200.0);
+        assert_eq!(err.to_string(), "latitude 200 out of range [-90, 90]");
+
+        let err = GeoValidationError::LongitudeOutOfRange(-300.0);
+        assert_eq!(err.to_string(), "longitude -300 out of range [-180, 180]");
+
+        let err = GeoValidationError::AltitudeOutOfRange(200_000.0);
+        assert!(err.to_string().contains("altitude 200000 out of range"));
+
+        let err = GeoValidationError::LatitudeNotFinite(f64::NAN);
+        assert!(err.to_string().contains("not finite"));
     }
 }

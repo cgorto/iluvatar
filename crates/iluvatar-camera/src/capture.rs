@@ -87,6 +87,13 @@ impl<'a> GrayscaleFrame<&'a mut [u8]> {
 /// Abstract camera capture interface
 pub trait CameraCapture: Send {
     fn resolution(&self) -> (u32, u32);
+
+    /// Capture a grayscale frame into the arena.
+    ///
+    /// # Safety Note
+    /// This returns a mutable slice from an immutable arena reference.
+    /// This is safe because `FrameArena` uses interior mutability (`bumpalo::Bump`).
+    #[allow(clippy::mut_from_ref)]
     fn capture_grayscale<'a>(
         &mut self,
         arena: &'a FrameArena,

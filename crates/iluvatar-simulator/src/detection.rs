@@ -16,6 +16,7 @@ use iluvatar_core::{DetectedPoint, DetectionConfig, TrackedObject};
 use iluvatar_server::detector::ObjectDetector;
 
 use crate::camera::CaptureCamera;
+use crate::render_camera::RenderCamera;
 use crate::voxels::VoxelGridResource;
 
 pub struct DetectionPlugin;
@@ -105,10 +106,11 @@ pub fn run_detection(
     grid_res: Res<VoxelGridResource>,
     mut detector_res: ResMut<DetectorResource>,
     mut output: ResMut<DetectionOutput>,
-    cameras: Query<&CaptureCamera>,
+    capture_cameras: Query<&CaptureCamera>,
+    render_cameras: Query<&RenderCamera>,
 ) {
-    // Count active cameras for confidence calculation
-    let active_cameras = cameras.iter().count() as u8;
+    // Count active cameras for confidence calculation (either type)
+    let active_cameras = (capture_cameras.iter().count() + render_cameras.iter().count()) as u8;
 
     // Build DetectionConfig from our config
     let detection_config = DetectionConfig {

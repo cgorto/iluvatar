@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 use glam::{UVec2, Vec2};
 
-use iluvatar_core::{CameraIntrinsics, Fov};
+use iluvatar_core::{CameraIntrinsics, DistortionModel, Fov};
 
 pub struct CameraPlugin;
 
@@ -111,6 +111,7 @@ fn default_intrinsics() -> CameraIntrinsics {
             horizontal: std::f32::consts::FRAC_PI_2, // 90 degrees
             vertical: std::f32::consts::FRAC_PI_3,   // 60 degrees
         },
+        distortion: DistortionModel::None,
     }
 }
 

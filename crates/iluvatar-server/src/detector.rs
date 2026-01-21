@@ -166,7 +166,7 @@ impl ObjectDetector {
             id: 0, // Anonymous - tracker assigns real ID
             centroid,
             bounding_box: BoundingBox::new(min, max),
-            point_count: count,
+            point_count: count as u32,
             total_intensity,
             velocity: None,
             confidence: total_confidence / count as f32,

@@ -1,6 +1,9 @@
 //! Simple moving targets
-
+use crate::render_layers::target_layers;
 use bevy::prelude::*;
+
+const TARGET_MODEL_PATH: &str = "models/craft_speederD.glb";
+const TARGET_SCALE: f32 = 5.0;
 
 pub struct TargetsPlugin;
 
@@ -46,6 +49,29 @@ pub enum MovementPattern {
         amp_x: f32,
         amp_z: f32,
     },
+}
+
+pub(crate) fn spawn_target(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    id: u32,
+    path: TargetPath,
+) -> Entity {
+    let initial_position = path.current_position(0.0);
+
+    commands
+        .spawn((
+            SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(TARGET_MODEL_PATH))),
+            Transform {
+                translation: initial_position,
+                scale: Vec3::splat(TARGET_SCALE),
+                ..default()
+            },
+            Target { id },
+            path,
+            target_layers(),
+        ))
+        .id()
 }
 
 impl TargetPath {
@@ -119,71 +145,67 @@ impl TargetPath {
     }
 }
 
-fn spawn_targets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let sphere_mesh = meshes.add(Sphere::new(1.5));
-    let red_mat = materials.add(Color::srgb(1.0, 0.2, 0.2));
-    let blue_mat = materials.add(Color::srgb(0.2, 0.2, 1.0));
-    let green_mat = materials.add(Color::srgb(0.2, 1.0, 0.2));
-    let purple_mat = materials.add(Color::srgb(0.8, 0.2, 0.8));
+fn spawn_targets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    // 1. Linear "Patrol" Target - High altitude, wide patrol
+    // Moves from x=-400 to x=400 at altitude 200m
+    let path = TargetPath::new_linear(
+        Vec3::new(-400.0, 200.0, 0.0),
+        Vec3::new(400.0, 200.0, 0.0),
+        0.2, // Slower relative speed for the long distance
+    );
+    spawn_target(&mut commands, &asset_server, 1, path);
 
-    // 1. Linear "Patrol" Targets
-    commands.spawn((
-        Mesh3d(sphere_mesh.clone()),
-        MeshMaterial3d(red_mat.clone()),
-        Transform::default(),
-        Target { id: 1 },
-        TargetPath::new_linear(Vec3::new(-50.0, 15.0, 0.0), Vec3::new(50.0, 15.0, 0.0), 0.5),
-    ));
+    // 2. Spiral Swarm - Loitering pattern
+    // Larger radius (200m) and height (150m)
+    // for i in 0..5 {
+    //     let angle = (i as f32) * std::f32::consts::TAU / 5.0;
+    //     let offset = Vec3::new(angle.cos() * 100.0, 150.0, angle.sin() * 100.0);
 
-    // 2. Spiral Swarm
-    for i in 0..5 {
-        let angle = (i as f32) * std::f32::consts::TAU / 5.0;
-        let offset = Vec3::new(angle.cos() * 20.0, 15.0, angle.sin() * 20.0);
+    //     commands.spawn((
+    //         SceneRoot(
+    //             asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/craft_speederD.glb")),
+    //         ),
+    //         Transform::from_scale(Vec3::splat(5.0)),
+    //         Target { id: 10 + i },
+    //         TargetPath {
+    //             origin: offset,
+    //             params: MovementPattern::Spiral {
+    //                 radius: 50.0,
+    //                 height: 30.0,
+    //                 frequency: 0.5,
+    //             },
+    //             speed: 0.8,
+    //             time_offset: angle,
+    //         },
+    //         target_layers(),
+    //     ));
+    // }
 
-        commands.spawn((
-            Mesh3d(sphere_mesh.clone()),
-            MeshMaterial3d(blue_mat.clone()),
-            Transform::default(),
-            Target { id: 10 + i },
-            TargetPath {
-                origin: offset,
-                params: MovementPattern::Spiral {
-                    radius: 10.0,
-                    height: 5.0,
-                    frequency: 2.0,
-                },
-                speed: 0.8,
-                time_offset: angle, // Desynchronize them
-            },
-        ));
-    }
+    // 3. Chaos Lissajous - Erratic maneuvers across the airspace
+    // Covering a large volume 300x300m
+    // for i in 0..3 {
+    //     commands.spawn((
+    //         SceneRoot(
+    //             asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/craft_speederD.glb")),
+    //         ),
+    //         Transform::from_scale(Vec3::splat(5.0)),
+    //         Target { id: 20 + i },
+    //         TargetPath {
+    //             origin: Vec3::new(0.0, 300.0, 0.0), // High altitude origin
+    //             params: MovementPattern::Lissajous {
+    //                 freq_x: 0.7 + (i as f32 * 0.1),
+    //                 freq_z: 0.9 + (i as f32 * 0.1),
+    //                 amp_x: 300.0,
+    //                 amp_z: 300.0,
+    //             },
+    //             speed: 0.5,
+    //             time_offset: (i as f32) * 10.0,
+    //         },
+    //         target_layers(),
+    //     ));
+    // }
 
-    // 3. Chaos Lissajous
-    for i in 0..3 {
-        commands.spawn((
-            Mesh3d(sphere_mesh.clone()),
-            MeshMaterial3d(purple_mat.clone()),
-            Transform::default(),
-            Target { id: 20 + i },
-            TargetPath {
-                origin: Vec3::new(0.0, 25.0, 0.0),
-                params: MovementPattern::Lissajous {
-                    freq_x: 1.3 + (i as f32 * 0.1),
-                    freq_z: 1.7 + (i as f32 * 0.1),
-                    amp_x: 30.0,
-                    amp_z: 30.0,
-                },
-                speed: 0.6,
-                time_offset: (i as f32) * 10.0,
-            },
-        ));
-    }
-
-    println!("Spawned swarm of targets");
+    println!("Spawned airport-scale targets");
 }
 
 fn move_targets(time: Res<Time>, mut query: Query<(&mut Transform, &TargetPath), With<Target>>) {
@@ -191,5 +213,14 @@ fn move_targets(time: Res<Time>, mut query: Query<(&mut Transform, &TargetPath),
 
     for (mut transform, path) in query.iter_mut() {
         transform.translation = path.current_position(t);
+
+        // Also make them look in the direction of movement
+        let vel = path.current_velocity(t);
+        if vel.length_squared() > 0.1 {
+            // Use look_to (negative z is forward in bevy)
+            // We might need to adjust based on model orientation.
+            // Assuming model forward is -Z.
+            transform.look_to(vel.normalize(), Vec3::Y);
+        }
     }
 }

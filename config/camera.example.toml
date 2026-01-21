@@ -1,31 +1,141 @@
 # Iluvatar Camera Configuration
+#
+# This example is configured for aircraft tracking at a regional airport.
+# Each camera unit needs its own configuration file with unique identity.
 
 [identity]
-# Unique identifier for this camera
+# Unique identifier for this camera (must be unique across deployment)
+# Use sequential integers: 1, 2, 3, etc.
 camera_id = 1
 
+# Human-readable name (optional, for debugging)
+# name = "FBO-Rooftop-West"
+
 [hardware]
-# Video device path (Linux V4L2)
+# Video device path
+# Linux V4L2: /dev/video0, /dev/video1, etc.
+# Raspberry Pi Camera: Use libcamera backend (handled automatically)
 device = "/dev/video0"
-# Capture resolution
+
+# Capture resolution (pixels)
+# Common options:
+#   1920x1080 (1080p) - Recommended for most deployments
+#   1280x720 (720p)   - Lower bandwidth, acceptable for close-range
+#   3840x2160 (4K)    - High resolution, requires powerful hardware
 width = 1920
 height = 1080
-# Target frame rate
+
+# Target frame rate (fps)
+# Higher = better temporal resolution, more bandwidth/CPU
+#   60 fps - Recommended for fast-moving targets (aircraft)
+#   30 fps - Acceptable for slower targets, reduces CPU load by half
 fps = 60
 
+# Camera field of view (degrees) - FALLBACK only, used when no calibration is available
+# If not specified, defaults to 90° horizontal. For accurate triangulation, use
+# calibration_file or inline calibration instead.
+# Common cameras:
+#   Raspberry Pi Camera Module 3 Wide: 102° horizontal
+#   Logitech C920: 78° horizontal
+#   Typical "wide angle": 90-120°
+#   Typical "standard": 60-80°
+# fov_horizontal = 90.0
+# fov_vertical = 60.0
+
+# ============================================================================
+# Camera Calibration (RECOMMENDED for accurate triangulation)
+# ============================================================================
+#
+# Lens distortion causes pixels at image edges to map to incorrect 3D rays.
+# For accurate multi-camera triangulation, you should calibrate each camera
+# using a checkerboard pattern and provide the calibration data here.
+#
+# Two options:
+#   1. External JSON file (preferred for sharing calibration between configs)
+#   2. Inline TOML calibration (convenient for single-camera setups)
+
+# Option 1: Load calibration from JSON file
+# The JSON file should contain: model_type, width, height, fx, fy, cx, cy, distortion
+# See config/calibration/example.json for the format
+# calibration_file = "calibration/camera_01.json"
+
+# Option 2: Inline calibration parameters
+# [hardware.calibration]
+# model = "opencv5"           # "opencv5" or "kannala_brandt4" (fisheye)
+# fx = 800.0                  # Focal length X (pixels)
+# fy = 800.0                  # Focal length Y (pixels)
+# cx = 960.0                  # Principal point X (pixels) - typically width/2
+# cy = 540.0                  # Principal point Y (pixels) - typically height/2
+# distortion = [-0.2, 0.1, 0.001, -0.001, 0.0]  # k1, k2, p1, p2, k3 for opencv5
+#                                                # k1, k2, k3, k4 for kannala_brandt4
+
+# To calibrate your camera:
+# 1. Print a checkerboard pattern (e.g., 9x6 inner corners)
+# 2. Capture 20-30 images from various angles and distances
+# 3. Use OpenCV's calibrateCamera() or a tool like:
+#    - ROS camera_calibration package
+#    - OpenCV's calibration tool
+#    - camera-intrinsic-calibration crate (Rust, outputs compatible JSON)
+# 4. Save the results and reference them here
+
 [localization]
-# GPS device path
-gps_device = "/dev/ttyUSB0"
+# GPS device path (for serial NMEA) or gpsd address
+# For gpsd, use "localhost:2947" or similar
+# For direct serial: /dev/ttyUSB0 or /dev/ttyACM0
+gps_device = "localhost:2947"
+
 # Timeout waiting for initial GPS fix (seconds)
+# Cold start can take 30-60 seconds, longer if poor sky view
 gps_timeout_secs = 60
+
+# Maximum time to continue dead reckoning before marking localization unavailable (seconds)
+dead_reckoning_timeout_secs = 30
+
+# IMU device path (optional - leave unset to use fixed orientation)
+# imu_device = "/dev/ttyUSB1"
+
+# Fixed orientation when no IMU is available: [yaw, pitch, roll] in degrees
+# Yaw: 0 = north, 90 = east, 180 = south, 270 = west
+# Pitch: positive = looking up, negative = looking down
+# Roll: camera rotation around viewing axis (usually 0)
+#
+# Example: Camera pointing west and 10° upward
+# fixed_orientation = [270.0, 10.0, 0.0]
+
+# Fixed position override (optional)
+# If set, GPS is ignored and this position is used
+# Use this for permanently mounted cameras with surveyed positions
+# [localization.fixed_position]
+# latitude = 47.5000
+# longitude = -122.3000
+# altitude = 45.0
 
 [processing]
 # Difference threshold (0-255) for motion detection
+# Pixel difference must exceed this to be considered motion
+#
+# Lower = more sensitive, more noise
+# Higher = less sensitive, may miss subtle motion
+#
+# Guidelines:
+#   15-20: Very sensitive, use in controlled lighting
+#   25-30: Standard, good for outdoor daytime
+#   35-40: Less sensitive, use in variable lighting or with distant targets
+#   
+# For aircraft at 1-2km, the apparent motion is small, so use lower threshold
 difference_threshold = 25
-# Minimum percentage of frame with motion before transmitting (0.0-100.0)
-motion_threshold_percent = 0.1
 
-# Grid origin (must match server config)
+# Minimum fraction of frame with motion before transmitting (0.0-1.0)
+# Frames with less motion than this are not sent (saves bandwidth)
+#
+# 0.0001 = 0.01% of pixels = ~200 pixels on 1080p (very sensitive)
+# 0.001  = 0.1% of pixels = ~2000 pixels on 1080p (recommended)
+# 0.01   = 1% of pixels = ~20000 pixels on 1080p (less sensitive)
+motion_threshold_fraction = 0.001
+
+# Grid origin (MUST MATCH SERVER CONFIG)
+# All cameras in a deployment must use the same origin
+# This defines the coordinate system for ray projection
 [processing.grid_origin]
 latitude = 47.6062
 longitude = -122.3321
@@ -33,14 +143,173 @@ altitude = 0.0
 
 [processing.raymarch]
 # Maximum ray distance in meters
+# Rays are traced from camera position up to this distance
+#
+# Set to cover your maximum target range plus some margin
+# For aircraft approach at 2km: use 2500-3000m
+# For local surveillance (pedestrians/vehicles): 200-500m
 max_distance = 500.0
-# Ray step size in meters
+
+# Step size in meters (legacy parameter, not used by DDA algorithm)
+# Kept for configuration compatibility
 step_size = 0.5
+
+# Distance attenuation (optional)
+# Reduces contribution intensity for distant voxels
+# Helps prioritize nearby, more certain detections
+#
+# Options:
+#   mode = "None" - No attenuation (default)
+#   mode = "Linear" with max_distance - Linear falloff to zero at max_distance
+#   mode = "InverseSquare" with reference_distance - 1/r² falloff
+
+# [processing.raymarch.attenuation]
+# mode = "Linear"
+# max_distance = 2000.0
 
 [network]
 # Server address (host:port)
+# Can be IP address or hostname
+# For cloud server: use public IP or domain name
+# For local server: use local IP (192.168.x.x) or hostname
 server_address = "localhost:4433"
-# Connection timeout in seconds (how long to retry before giving up)
+
+# Connection timeout in seconds
+# How long to wait for initial connection before giving up
 connection_timeout_secs = 30
-# Frame buffer size (number of frames to buffer before dropping oldest)
+
+# Frame buffer size (number of frames)
+# If network is slow, frames are buffered here
+# If buffer fills, oldest frames are dropped
+# Larger = more tolerance for network hiccups, more memory usage
 frame_buffer_size = 4
+
+# Maximum reconnection attempts
+# If connection is lost, camera will retry this many times
+# With exponential backoff, 100 attempts ≈ 30 minutes of retrying
+max_reconnect_attempts = 100
+
+# Maximum total time to spend reconnecting (seconds)
+# Whichever limit (attempts or timeout) is reached first stops reconnection
+reconnect_timeout_secs = 1800
+
+# Interval between heartbeat messages (seconds)
+# Keeps connection alive and lets server detect stale cameras
+heartbeat_interval_secs = 15
+
+# ============================================================================
+# TLS Certificate Verification (REQUIRED for production)
+# ============================================================================
+#
+# The camera uses QUIC with TLS for secure communication with the server.
+# You MUST configure certificate verification using one of these methods:
+#
+# Option 1: Certificate fingerprint pinning (RECOMMENDED for production)
+#   Most secure option - directly pins the expected server certificate.
+#   Even if a CA is compromised, only the specific certificate is trusted.
+#
+# Option 2: CA certificate verification
+#   Verify the server certificate chain against a trusted CA certificate.
+#   Useful when using certificates issued by a private CA or self-signed CA.
+#
+# Option 3: Skip verification (DEVELOPMENT ONLY - DO NOT USE IN PRODUCTION)
+#   Disables all TLS verification. This is a critical security vulnerability
+#   and should NEVER be used in production deployments.
+#
+# If no verification method is configured, the camera will refuse to start.
+
+[network.tls]
+# SHA-256 fingerprint of the expected server certificate (64 hex characters).
+# This provides certificate pinning - the most secure verification method.
+#
+# Generate the fingerprint from your server certificate:
+#   openssl x509 -in server.crt -noout -sha256 -fingerprint | tr -d ':' | cut -d'=' -f2
+# Or:
+#   openssl x509 -in server.crt -outform DER | sha256sum | cut -d' ' -f1
+#
+# Example (replace with your actual server certificate fingerprint):
+# certificate_fingerprint = "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd"
+
+# Path to a PEM-encoded CA certificate file.
+# The server's certificate chain will be verified against this CA.
+# Can be used alone or together with certificate_fingerprint for defense in depth.
+#
+# ca_cert_path = "/etc/iluvatar/ca.crt"
+
+# DANGEROUS: Skip all TLS certificate verification.
+# WARNING: This is a CRITICAL SECURITY VULNERABILITY!
+# Only use this for local development with self-signed certificates.
+# NEVER enable this in production - it allows man-in-the-middle attacks.
+#
+# When enabled, a warning will be logged at startup.
+dangerous_skip_verification = false
+
+# ============================================================================
+# Example configurations for different deployment scenarios
+# ============================================================================
+
+# --- Aircraft tracking (airport approach monitoring) ---
+# [processing]
+# difference_threshold = 20        # Lower for distant targets
+# motion_threshold_fraction = 0.0005
+#
+# [processing.raymarch]
+# max_distance = 3000.0            # Cover 2km+ approach corridor
+
+# --- Local surveillance (pedestrians, vehicles) ---
+# [processing]
+# difference_threshold = 30        # Standard sensitivity
+# motion_threshold_fraction = 0.001
+#
+# [processing.raymarch]
+# max_distance = 300.0             # Typical urban range
+
+# --- High-clutter environment (trees, variable lighting) ---
+# [processing]
+# difference_threshold = 40        # Less sensitive to reduce noise
+# motion_threshold_fraction = 0.002
+
+# ============================================================================
+# Example multi-camera deployment
+# ============================================================================
+
+# --- Camera 1: FBO Rooftop (building-mounted, wired power/network) ---
+# [identity]
+# camera_id = 1
+# name = "FBO-Rooftop"
+# 
+# [localization]
+# gps_device = "localhost:2947"
+# fixed_orientation = [270.0, 8.0, 0.0]  # Looking west, slightly up
+# 
+# [network]
+# server_address = "192.168.1.100:4433"  # Local server
+
+# --- Camera 2: Perimeter Pole (solar powered, cellular) ---
+# [identity]
+# camera_id = 2
+# name = "Perimeter-South"
+# 
+# [localization]
+# gps_device = "/dev/ttyUSB0"
+# fixed_orientation = [315.0, 12.0, 0.0]  # Looking NW, more upward
+# 
+# [processing]
+# difference_threshold = 28  # Slightly higher - more exposure to wind/trees
+# 
+# [network]
+# server_address = "server.example.com:4433"  # Cloud server via 4G
+
+# --- Camera 3: Control Tower (high vantage point, surveyed position) ---
+# [identity]
+# camera_id = 3
+# name = "Tower-Top"
+# 
+# [localization]
+# gps_device = "localhost:2947"
+# fixed_orientation = [250.0, 5.0, 0.0]  # Looking WSW, nearly horizontal
+#
+# [localization.fixed_position]
+# latitude = 47.5010
+# longitude = -122.2990
+# altitude = 55.0     # Tower is 25m above ground (30m field elevation)

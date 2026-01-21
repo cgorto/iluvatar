@@ -24,6 +24,8 @@ gps_timeout_secs = 60
 difference_threshold = 25
 # Minimum percentage of frame with motion before transmitting (0.0-100.0)
 motion_threshold_percent = 0.1
+# Grid origin for coordinate system (should match server config)
+grid_origin = { latitude = 47.6062, longitude = -122.3321, altitude = 10.0 }
 
 [processing.raymarch]
 # Maximum ray distance in meters
@@ -33,8 +35,14 @@ step_size = 0.5
 
 [network]
 # Server address (host:port)
-server_address = "localhost:4433"
-# Connection timeout in seconds (how long to retry before giving up)
+server_address = "127.0.0.1:4433"
+# Connection timeout in seconds (how long to retry before giving up on initial connect)
 connection_timeout_secs = 30
 # Frame buffer size (number of frames to buffer before dropping oldest)
 frame_buffer_size = 4
+# Maximum reconnection attempts before exiting
+max_reconnect_attempts = 100
+# Maximum total time to spend reconnecting (seconds)
+reconnect_timeout_secs = 1800
+# Interval between heartbeat messages (seconds)
+heartbeat_interval_secs = 15

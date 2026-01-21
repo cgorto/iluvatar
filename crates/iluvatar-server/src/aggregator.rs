@@ -48,6 +48,15 @@ impl FrameAggregator {
         let camera_id = frame.camera_id;
         let frame_ts = frame.timestamp;
 
+        // Validate camera ID fits in bitmask (same pattern as grid.rs)
+        if camera_id >= 64 {
+            tracing::warn!(
+                "Camera ID {} exceeds maximum of 63 (64-camera limit), ignoring frame",
+                camera_id
+            );
+            return;
+        }
+
         self.active_cameras.insert(camera_id, now);
 
         // Prune inactive cameras (haven't heard from in 2 seconds)

@@ -1,10 +1,11 @@
-use iluvatar_core::{CameraMessage, TrackedObject};
+use iluvatar_core::CameraMessage;
 use iluvatar_server::{
     aggregator::FrameAggregator,
     camera_mgmt::CameraRegistry,
     config::{ConfigError, ServerConfig},
     detector::ObjectDetector,
     grid::SparseVoxelGrid,
+    quic::QuicServer,
     time::Clock,
     tracker::ObjectTracker,
 };
@@ -54,27 +55,44 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
     // Shared state
     let clock = Clock::new();
     let registry = Arc::new(RwLock::new(CameraRegistry::new()));
-    let grid = Arc::new(SparseVoxelGrid::new(
+    let grid = Arc::new(SparseVoxelGrid::with_max_voxels(
         config.grid_origin(),
         config.grid_dimensions(),
         config.grid.voxel_size,
         config.decay.rate,
         clock.clone(),
+        config.grid.max_voxels,
     ));
 
     // Frame channel from cameras to processing
-    let (_msg_tx, msg_rx) = async_channel::bounded::<CameraMessage>(1000);
+    let (msg_tx, msg_rx) = async_channel::bounded::<CameraMessage>(1000);
 
     // Update channel to WebSocket clients
     let (update_tx, update_rx) =
         async_channel::bounded::<iluvatar_server::websocket::BroadcastMessage>(100);
 
-    // TODO: Start QUIC server for cameras
-    // For now, we'll just log that it would start
-    info!(
-        addr = %config.server.listen_address,
-        "QUIC server would start (not implemented)"
-    );
+    // Start QUIC server for cameras
+    let listen_addr: std::net::SocketAddr = config
+        .server
+        .listen_address
+        .parse()
+        .map_err(|e| ServerError::Network(format!("Invalid listen address: {}", e)))?;
+    let grid_config = config.to_grid_config_message();
+    let registry_clone = registry.clone();
+    let msg_tx_clone = msg_tx.clone();
+    smol::spawn(async move {
+        match QuicServer::bind(listen_addr, None).await {
+            Ok(server) => {
+                if let Err(e) = server.run(msg_tx_clone, registry_clone, grid_config).await {
+                    error!("QUIC server error: {}", e);
+                }
+            }
+            Err(e) => {
+                error!("Failed to start QUIC server: {}", e);
+            }
+        }
+    })
+    .detach();
 
     // Start WebSocket server for clients
     let ws_port = config.server.websocket_port;
@@ -146,6 +164,10 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
 
         // Process aggregated batches
         while let Some(batch) = aggregator.try_get_batch() {
+            // Reset camera masks before processing each batch to ensure camera_count()
+            // reflects only cameras that contributed in THIS batch, not accumulated
+            // across time due to voxel decay persistence.
+            grid.reset_camera_masks();
             for frame in batch {
                 grid.add_frame(&frame);
             }
@@ -165,30 +187,15 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
             // Update tracking
             let now = clock.now();
             let dt = now.duration_since(last_decay).as_secs_f32();
-            let mut tracked = tracker.update(detections, dt);
-
-            // GHOST DANCER: Because the eyes (QUIC) aren't working yet, we conjure a dream.
-            // A synthetic spirit to prove the voice works.
-            if tracked.is_empty() {
-                let time = clock.now_micros() as f64 / 1_000_000.0;
-                let x = (time.cos() * 10.0) as f32;
-                let y = (time.sin() * 10.0) as f32;
-                tracked.push(TrackedObject {
-                    id: 999,
-                    centroid: glam::Vec3::new(x, y, 1.0),
-                    bounding_box: iluvatar_core::BoundingBox::new(
-                        glam::Vec3::new(x - 0.5, y - 0.5, 0.0),
-                        glam::Vec3::new(x + 0.5, y + 0.5, 2.0),
-                    ),
-                    point_count: 100,
-                    total_intensity: 1000.0,
-                    velocity: Some(glam::Vec3::new(-y, x, 0.0)),
-                    confidence: 1.0,
-                });
-            }
+            let tracked = tracker.update(detections, dt);
 
             // Queue update for broadcast (if any clients)
             if !tracked.is_empty() {
+                tracing::debug!(
+                    object_count = tracked.len(),
+                    ids = ?tracked.iter().map(|o| o.id).collect::<Vec<_>>(),
+                    "Broadcasting objects"
+                );
                 let update = iluvatar_server::websocket::BroadcastMessage {
                     timestamp: clock.now_micros(),
                     objects: tracked,

@@ -23,6 +23,9 @@ tracing-subscriber = { workspace = true }
 bevy = { version = "0.18", features = ["free_camera"] }
 bevy_egui = "0.39"
 
+# GPU buffer handling
+bytemuck = { version = "1.14", features = ["derive"] }
+
 # Configuration
 toml = "0.8"
 crossbeam-channel = "0.5.15"

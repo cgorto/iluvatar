@@ -1,5 +1,6 @@
+use crate::grid::DEFAULT_MAX_VOXELS;
 use glam::UVec3;
-use iluvatar_core::{DecayConfig, DetectionConfig, GeoPosition};
+use iluvatar_core::{DecayConfig, DetectionConfig, GeoPosition, GridConfigMessage};
 use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
@@ -46,6 +47,14 @@ pub struct GridSettings {
     pub voxel_size: f32,
     pub origin: GeoOriginConfig,
     pub dimensions: [u32; 3],
+    /// Maximum number of voxels allowed in the grid (memory protection).
+    /// Defaults to 1,000,000 voxels.
+    #[serde(default = "default_max_voxels")]
+    pub max_voxels: usize,
+}
+
+fn default_max_voxels() -> usize {
+    DEFAULT_MAX_VOXELS
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +166,16 @@ impl ServerConfig {
             min_contributors: self.detection.min_contributors,
             cluster_epsilon: self.detection.cluster_epsilon,
             cluster_min_points: self.detection.cluster_min_points,
+        }
+    }
+
+    pub fn to_grid_config_message(&self) -> GridConfigMessage {
+        GridConfigMessage {
+            origin_lat: self.grid.origin.latitude,
+            origin_lon: self.grid.origin.longitude,
+            origin_alt: self.grid.origin.altitude,
+            dimensions: self.grid.dimensions,
+            voxel_size: self.grid.voxel_size,
         }
     }
 }

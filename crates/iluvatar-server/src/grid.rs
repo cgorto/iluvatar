@@ -7,8 +7,14 @@ use iluvatar_core::{
 };
 use parking_lot::Mutex;
 use std::sync::Arc;
+use tracing::warn;
 
 const INTENSITY_THRESHOLD: f32 = 0.01;
+
+/// Default maximum number of voxels allowed in the grid.
+/// This prevents unbounded memory growth from noisy cameras.
+/// At 1 meter resolution, 1 million voxels = 1km³ coverage.
+pub const DEFAULT_MAX_VOXELS: usize = 1_000_000;
 
 /// Compute the Nth percentile of a slice using quickselect.
 /// Percentile should be 0.0 to 1.0 (e.g., 0.9 for 90th percentile).
@@ -51,6 +57,8 @@ pub struct SparseVoxelGrid {
     clock: Arc<Clock>,
     /// Last decay time, wrapped in Mutex for interior mutability (allows apply_decay on &self)
     last_decay: Mutex<TimePoint>,
+    /// Maximum number of voxels allowed in the grid (memory protection)
+    max_voxels: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +98,33 @@ impl SparseVoxelGrid {
         decay_rate: f32,
         clock: Arc<Clock>,
     ) -> Self {
+        Self::with_max_voxels(
+            origin,
+            dimensions,
+            voxel_size,
+            decay_rate,
+            clock,
+            DEFAULT_MAX_VOXELS,
+        )
+    }
+
+    /// Create a new sparse voxel grid with a custom maximum voxel limit.
+    ///
+    /// # Arguments
+    /// * `origin` - The WGS84 origin of the grid
+    /// * `dimensions` - Grid dimensions in voxels (x, y, z)
+    /// * `voxel_size` - Size of each voxel in meters
+    /// * `decay_rate` - Exponential decay rate for voxel intensities
+    /// * `clock` - Shared clock for time tracking
+    /// * `max_voxels` - Maximum number of voxels allowed (memory protection)
+    pub fn with_max_voxels(
+        origin: GeoPosition,
+        dimensions: UVec3,
+        voxel_size: f32,
+        decay_rate: f32,
+        clock: Arc<Clock>,
+        max_voxels: usize,
+    ) -> Self {
         Self {
             voxels: DashMap::new(),
             origin,
@@ -98,6 +133,7 @@ impl SparseVoxelGrid {
             decay_rate,
             last_decay: Mutex::new(clock.now()),
             clock,
+            max_voxels,
         }
     }
 
@@ -140,6 +176,12 @@ impl SparseVoxelGrid {
     /// Add contributions from a specific camera.
     /// The camera_id is used to track unique camera contributors per voxel.
     ///
+    /// If the grid exceeds `max_voxels`, new voxels will be rejected and a warning logged.
+    /// Existing voxels can still be updated.
+    ///
+    /// **NaN/Inf validation**: Contributions with NaN or infinite intensity values are
+    /// silently skipped as defense-in-depth. A warning is logged if any are detected.
+    ///
     /// # Panics
     /// Panics if `camera_id >= 64`. The camera bitmask is stored as a u64,
     /// limiting the system to 64 unique cameras. If more cameras are needed,
@@ -157,25 +199,64 @@ impl SparseVoxelGrid {
         let now = self.clock.now();
         let camera_bit = 1u64 << camera_id;
 
+        let mut rejected_count = 0usize;
+        let mut invalid_count = 0usize;
+
         for contrib in contributions {
+            // Defense-in-depth: validate intensity at the grid level
+            // This catches any NaN/Inf that slipped through protocol deserialization
+            if !contrib.intensity.is_finite() || contrib.intensity < 0.0 {
+                invalid_count += 1;
+                continue;
+            }
+
             if !self.in_bounds(contrib.index) {
                 continue;
             }
 
             let idx = Self::pack_index(contrib.index.x, contrib.index.y, contrib.index.z);
 
-            self.voxels
-                .entry(idx)
-                .and_modify(|v| {
-                    v.intensity += contrib.intensity;
-                    v.camera_mask |= camera_bit;
-                    v.last_update = now;
-                })
-                .or_insert(Voxel {
-                    intensity: contrib.intensity,
-                    camera_mask: camera_bit,
-                    last_update: now,
-                });
+            // Check if voxel already exists - always allow updates to existing voxels
+            if let Some(mut entry) = self.voxels.get_mut(&idx) {
+                entry.intensity += contrib.intensity;
+                entry.camera_mask |= camera_bit;
+                entry.last_update = now;
+            } else {
+                // New voxel - check capacity limit
+                if self.voxels.len() >= self.max_voxels {
+                    rejected_count += 1;
+                    continue;
+                }
+
+                // Insert new voxel (race condition: another thread might have inserted,
+                // but that's fine - we'll just update it)
+                self.voxels
+                    .entry(idx)
+                    .and_modify(|v| {
+                        v.intensity += contrib.intensity;
+                        v.camera_mask |= camera_bit;
+                        v.last_update = now;
+                    })
+                    .or_insert(Voxel {
+                        intensity: contrib.intensity,
+                        camera_mask: camera_bit,
+                        last_update: now,
+                    });
+            }
+        }
+
+        if invalid_count > 0 {
+            warn!(
+                "Camera {}: rejected {} contributions with invalid intensity (NaN/Inf/negative)",
+                camera_id, invalid_count
+            );
+        }
+
+        if rejected_count > 0 {
+            warn!(
+                "Grid at capacity ({} voxels): rejected {} new voxel contributions from camera {}",
+                self.max_voxels, rejected_count, camera_id
+            );
         }
     }
 
@@ -364,6 +445,27 @@ impl SparseVoxelGrid {
             .iter()
             .map(|entry| entry.value().intensity)
             .fold(0.0f32, f32::max)
+    }
+
+    /// Get debug statistics about voxel distribution.
+    /// Returns (multi_camera_count, high_intensity_count) where:
+    /// - multi_camera_count: voxels seen by >= 2 cameras
+    /// - high_intensity_count: voxels with intensity >= 5.0
+    pub fn debug_stats(&self) -> (usize, usize) {
+        let mut multi_cam = 0usize;
+        let mut high_intensity = 0usize;
+
+        for entry in self.voxels.iter() {
+            let v = entry.value();
+            if v.camera_count() >= 2 {
+                multi_cam += 1;
+            }
+            if v.intensity >= 5.0 {
+                high_intensity += 1;
+            }
+        }
+
+        (multi_cam, high_intensity)
     }
 }
 
@@ -643,6 +745,185 @@ mod tests {
 
         // Intensity should be preserved
         assert!((grid.voxels.get(&packed).unwrap().intensity - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_max_voxels_limit() {
+        let clock = Clock::new();
+        // Create grid with very low max_voxels limit
+        let grid = SparseVoxelGrid::with_max_voxels(
+            GeoPosition::new(0.0, 0.0, 0.0),
+            UVec3::new(100, 100, 100),
+            1.0,
+            0.0, // No decay
+            clock,
+            5, // Only allow 5 voxels
+        );
+
+        // Try to add 10 voxels at different positions
+        let contributions: Vec<VoxelContribution> = (0..10)
+            .map(|i| VoxelContribution {
+                index: UVec3::new(i, 0, 0),
+                intensity: 1.0,
+            })
+            .collect();
+
+        grid.add_camera_contributions(0, &contributions);
+
+        // Should be capped at max_voxels
+        assert_eq!(grid.active_count(), 5);
+    }
+
+    #[test]
+    fn test_max_voxels_allows_updates_to_existing() {
+        let clock = Clock::new();
+        let grid = SparseVoxelGrid::with_max_voxels(
+            GeoPosition::new(0.0, 0.0, 0.0),
+            UVec3::new(100, 100, 100),
+            1.0,
+            0.0,
+            clock,
+            2, // Only allow 2 voxels
+        );
+
+        // Add 2 voxels - fills the grid
+        let contributions = vec![
+            VoxelContribution {
+                index: UVec3::new(0, 0, 0),
+                intensity: 1.0,
+            },
+            VoxelContribution {
+                index: UVec3::new(1, 0, 0),
+                intensity: 1.0,
+            },
+        ];
+        grid.add_camera_contributions(0, &contributions);
+        assert_eq!(grid.active_count(), 2);
+
+        // Try to add 3 more: 1 existing (should update), 2 new (should be rejected)
+        let contributions2 = vec![
+            VoxelContribution {
+                index: UVec3::new(0, 0, 0), // Existing - should update
+                intensity: 5.0,
+            },
+            VoxelContribution {
+                index: UVec3::new(2, 0, 0), // New - should be rejected
+                intensity: 1.0,
+            },
+            VoxelContribution {
+                index: UVec3::new(3, 0, 0), // New - should be rejected
+                intensity: 1.0,
+            },
+        ];
+        grid.add_camera_contributions(1, &contributions2);
+
+        // Still only 2 voxels
+        assert_eq!(grid.active_count(), 2);
+
+        // But the existing voxel was updated
+        let packed = SparseVoxelGrid::pack_index(0, 0, 0);
+        let voxel = grid.voxels.get(&packed).unwrap();
+        assert!((voxel.intensity - 6.0).abs() < 0.01); // 1.0 + 5.0
+        assert_eq!(voxel.camera_count(), 2); // Both cameras contributed
+    }
+
+    #[test]
+    fn test_nan_inf_contributions_rejected() {
+        let clock = Clock::new();
+        let grid = SparseVoxelGrid::new(
+            GeoPosition::new(0.0, 0.0, 0.0),
+            UVec3::new(100, 100, 100),
+            1.0,
+            0.0, // No decay
+            clock,
+        );
+
+        // Mix of valid and invalid contributions
+        let contributions = vec![
+            VoxelContribution {
+                index: UVec3::new(1, 0, 0),
+                intensity: 1.0, // Valid
+            },
+            VoxelContribution {
+                index: UVec3::new(2, 0, 0),
+                intensity: f32::NAN, // Invalid - NaN
+            },
+            VoxelContribution {
+                index: UVec3::new(3, 0, 0),
+                intensity: f32::INFINITY, // Invalid - Infinity
+            },
+            VoxelContribution {
+                index: UVec3::new(4, 0, 0),
+                intensity: f32::NEG_INFINITY, // Invalid - Negative infinity
+            },
+            VoxelContribution {
+                index: UVec3::new(5, 0, 0),
+                intensity: -1.0, // Invalid - Negative
+            },
+            VoxelContribution {
+                index: UVec3::new(6, 0, 0),
+                intensity: 2.0, // Valid
+            },
+        ];
+
+        grid.add_camera_contributions(0, &contributions);
+
+        // Only 2 valid contributions should be added
+        assert_eq!(grid.active_count(), 2);
+
+        // Verify the correct voxels were added
+        let packed1 = SparseVoxelGrid::pack_index(1, 0, 0);
+        let packed6 = SparseVoxelGrid::pack_index(6, 0, 0);
+        assert!(grid.voxels.get(&packed1).is_some());
+        assert!(grid.voxels.get(&packed6).is_some());
+
+        // Invalid ones should not exist
+        let packed2 = SparseVoxelGrid::pack_index(2, 0, 0);
+        let packed3 = SparseVoxelGrid::pack_index(3, 0, 0);
+        let packed4 = SparseVoxelGrid::pack_index(4, 0, 0);
+        let packed5 = SparseVoxelGrid::pack_index(5, 0, 0);
+        assert!(grid.voxels.get(&packed2).is_none());
+        assert!(grid.voxels.get(&packed3).is_none());
+        assert!(grid.voxels.get(&packed4).is_none());
+        assert!(grid.voxels.get(&packed5).is_none());
+    }
+
+    #[test]
+    fn test_nan_contribution_does_not_corrupt_existing_voxel() {
+        let clock = Clock::new();
+        let grid = SparseVoxelGrid::new(
+            GeoPosition::new(0.0, 0.0, 0.0),
+            UVec3::new(100, 100, 100),
+            1.0,
+            0.0,
+            clock,
+        );
+
+        // Add a valid contribution first
+        let valid_contrib = vec![VoxelContribution {
+            index: UVec3::new(10, 10, 10),
+            intensity: 5.0,
+        }];
+        grid.add_camera_contributions(0, &valid_contrib);
+
+        let packed = SparseVoxelGrid::pack_index(10, 10, 10);
+        let initial_intensity = grid.voxels.get(&packed).unwrap().intensity;
+        assert!((initial_intensity - 5.0).abs() < 0.01);
+
+        // Now try to add a NaN contribution to the same voxel
+        // This should be rejected, not corrupt the existing value
+        let nan_contrib = vec![VoxelContribution {
+            index: UVec3::new(10, 10, 10),
+            intensity: f32::NAN,
+        }];
+        grid.add_camera_contributions(1, &nan_contrib);
+
+        // Intensity should remain unchanged (NaN was rejected)
+        let final_intensity = grid.voxels.get(&packed).unwrap().intensity;
+        assert!(
+            (final_intensity - 5.0).abs() < 0.01,
+            "NaN contribution should not modify existing voxel"
+        );
     }
 }
 

@@ -51,6 +51,29 @@ impl Plugin for TrackingPlugin {
     }
 }
 
+/// Tracking plugin variant for render mode.
+/// Runs after motion_based_raymarch instead of project_and_raymarch.
+pub struct TrackingPluginForRenderMode;
+
+impl Plugin for TrackingPluginForRenderMode {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<TrackingConfig>()
+            .init_resource::<TrackingState>()
+            .init_resource::<TrackingMetrics>()
+            .add_systems(
+                Update,
+                (
+                    run_detection_and_tracking,
+                    visualize_tracked_objects,
+                    compute_tracking_metrics,
+                    print_tracking_stats,
+                )
+                    .chain()
+                    .after(crate::motion_raymarch::motion_based_raymarch),
+            );
+    }
+}
+
 /// Configuration for the tracking system
 #[derive(Resource, Clone)]
 pub struct TrackingConfig {
@@ -255,26 +278,25 @@ fn visualize_tracked_objects(
         }
 
         // Draw velocity vector if available
-        if show_velocity {
-            if let Some(vel) = obj.velocity {
-                if vel.length() > 0.1 {
-                    // Scale velocity for visualization (1 second lookahead)
-                    let vel_end = pos + vel;
-                    gizmos.arrow(pos, vel_end, Color::WHITE);
-                }
-            }
+        if show_velocity
+            && let Some(vel) = obj.velocity
+            && vel.length() > 0.1
+        {
+            // Scale velocity for visualization (1 second lookahead)
+            let vel_end = pos + vel;
+            gizmos.arrow(pos, vel_end, Color::WHITE);
         }
 
         // Draw track history (trail)
-        if show_trails {
-            if let Some(history) = state.track_histories.get(&obj.id) {
-                let points: Vec<Vec3> = history.iter().map(|p| *p + grid_origin).collect();
-                if points.len() >= 2 {
-                    for i in 0..points.len() - 1 {
-                        let alpha = i as f32 / points.len() as f32;
-                        let trail_color = color.with_alpha(alpha * 0.5);
-                        gizmos.line(points[i], points[i + 1], trail_color);
-                    }
+        if show_trails
+            && let Some(history) = state.track_histories.get(&obj.id)
+        {
+            let points: Vec<Vec3> = history.iter().map(|p| *p + grid_origin).collect();
+            if points.len() >= 2 {
+                for i in 0..points.len() - 1 {
+                    let alpha = i as f32 / points.len() as f32;
+                    let trail_color = color.with_alpha(alpha * 0.5);
+                    gizmos.line(points[i], points[i + 1], trail_color);
                 }
             }
         }
@@ -335,12 +357,12 @@ fn compute_tracking_metrics(
             total_pos_error += best_dist;
 
             // Velocity error: compare tracked velocity to ground truth velocity
-            if let Some(track) = best_track {
-                if let Some(vel) = track.velocity {
-                    // Compute velocity error as vector difference
-                    let vel_error = (vel - *gt_vel).length();
-                    total_vel_error += vel_error;
-                }
+            if let Some(track) = best_track
+                && let Some(vel) = track.velocity
+            {
+                // Compute velocity error as vector difference
+                let vel_error = (vel - *gt_vel).length();
+                total_vel_error += vel_error;
             }
         }
     }

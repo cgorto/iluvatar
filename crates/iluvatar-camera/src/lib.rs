@@ -9,4 +9,4 @@ pub mod raymarch;
 
 pub use arena::FrameArena;
 pub use channel::DropOldestChannel;
-pub use config::CameraConfig;
+pub use config::{CameraConfig, TlsConfig};

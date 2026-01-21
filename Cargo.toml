@@ -26,10 +26,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 smol = "2.0"
 async-channel = "2.3"
 futures-lite = "2.5"
+async-compat = "0.2"
 
 # Networking
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
 
 # Memory management
 bumpalo = { version = "3.16", features = ["collections"] }

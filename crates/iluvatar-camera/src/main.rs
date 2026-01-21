@@ -1,4 +1,8 @@
+use async_signal::{Signal, Signals};
+use futures_lite::StreamExt;
 use glam::Vec3;
+#[cfg(feature = "real")]
+use iluvatar_camera::localization::{GpsFallbackMode, LocalizerBuilder};
 use iluvatar_camera::{
     arena::FrameArena,
     capture::{CameraCapture, DummyCamera},
@@ -6,14 +10,14 @@ use iluvatar_camera::{
     config::{CameraConfig, ConfigError},
     difference::FrameProcessor,
     localization::{DummyLocalizer, Localizer},
-    network::NetworkClient,
+    network::{NetworkClient, NetworkError},
     raymarch::Raymarcher,
 };
-use iluvatar_core::{BoundingBox, CameraFrame, CameraRegistration, GeoPosition};
+use iluvatar_core::{BoundingBox, CameraFrame, CameraRegistration, GeoPosition, GridConfigMessage};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Error)]
 enum CameraError {
@@ -24,11 +28,51 @@ enum CameraError {
     #[error("Capture error: {0}")]
     Capture(#[from] iluvatar_camera::capture::CaptureError),
     #[error("Network error: {0}")]
-    Network(#[from] iluvatar_camera::network::NetworkError),
+    Network(#[from] NetworkError),
     #[error("GPS timeout: no fix within {0} seconds")]
     GpsTimeout(u64),
     #[error("Server connection timeout")]
     ConnectionTimeout,
+    #[error("System error: {0}")]
+    System(String),
+}
+
+/// Metrics tracked during camera operation.
+#[derive(Debug, Default)]
+struct CameraMetrics {
+    frames_processed: u64,
+    frames_sent: u64,
+    reconnect_count: u32,
+    last_stats_time: Option<Instant>,
+}
+
+impl CameraMetrics {
+    fn new() -> Self {
+        Self {
+            last_stats_time: Some(Instant::now()),
+            ..Default::default()
+        }
+    }
+
+    fn log_stats(&mut self, frame_buffer: &DropOldestChannel<CameraFrame>) {
+        if let Some(last_time) = self.last_stats_time
+            && last_time.elapsed().as_secs() >= 10
+        {
+            let elapsed = last_time.elapsed().as_secs_f64();
+            let fps = self.frames_processed as f64 / elapsed;
+            info!(
+                fps = format!("{:.1}", fps),
+                frames_processed = self.frames_processed,
+                frames_sent = self.frames_sent,
+                dropped = frame_buffer.dropped_count(),
+                reconnects = self.reconnect_count,
+                "Stats"
+            );
+            self.frames_processed = 0;
+            self.frames_sent = 0;
+            self.last_stats_time = Some(Instant::now());
+        }
+    }
 }
 
 fn main() {
@@ -45,10 +89,18 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "config/camera.toml".to_string());
 
-    if let Err(e) = smol::block_on(run(Path::new(&config_path))) {
-        error!("Fatal error: {e}");
-        std::process::exit(1);
-    }
+    let exit_code = match smol::block_on(run(Path::new(&config_path))) {
+        Ok(()) => {
+            info!("Camera shutdown complete");
+            0
+        }
+        Err(e) => {
+            error!("Fatal error: {e}");
+            1
+        }
+    };
+
+    std::process::exit(exit_code);
 }
 
 async fn run(config_path: &Path) -> Result<(), CameraError> {
@@ -58,6 +110,10 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
         "Configuration loaded"
     );
 
+    // Set up signal handler for graceful shutdown
+    let mut signals = Signals::new([Signal::Term, Signal::Int])
+        .map_err(|e| CameraError::System(format!("Failed to set up signal handler: {}", e)))?;
+
     // Initialize components
     let mut camera = create_camera(&config);
     let mut processor = FrameProcessor::new(config.processing.difference_threshold);
@@ -65,7 +121,8 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     let mut network = NetworkClient::new(
         config.network.server_address.clone(),
         config.identity.camera_id,
-    );
+        config.network.tls.clone(),
+    )?;
 
     // Wait for GPS fix
     info!("Waiting for GPS fix...");
@@ -77,31 +134,20 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     connect_with_timeout(&mut network, config.connection_timeout()).await?;
     info!("Connected to server");
 
-    // Register with server
+    // Create registration (stored for re-registration after reconnect)
     let registration = CameraRegistration {
         version: iluvatar_core::PROTOCOL_VERSION,
         camera_id: config.identity.camera_id,
-        intrinsics: config.to_intrinsics(),
+        intrinsics: config.to_intrinsics()?,
         initial_pose,
     };
-    network.register(registration).await?;
+
+    // Register with server and receive grid configuration
+    let mut grid_config = network.register(registration.clone()).await?;
     info!("Registered with server");
 
-    // TODO: Receive grid config from server
-    // For now, use a default grid
-    let grid_bounds = BoundingBox::new(Vec3::splat(-500.0), Vec3::splat(500.0));
-    let voxel_size = 1.0;
-
-    let origin = &config.processing.grid_origin;
-    let world_origin = GeoPosition::new(origin.latitude, origin.longitude, origin.altitude);
-
-    let raymarcher = Raymarcher::new(
-        config.to_intrinsics(),
-        config.to_raymarch_config(),
-        grid_bounds,
-        voxel_size,
-        world_origin,
-    );
+    // Configure raymarcher with server-provided grid
+    let mut raymarcher = create_raymarcher(&config, &grid_config);
 
     // Create frame buffer for backpressure
     let frame_buffer: DropOldestChannel<CameraFrame> =
@@ -110,11 +156,16 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     // Calculate thresholds
     let motion_threshold = config.motion_pixel_threshold();
     let frame_interval = config.frame_interval();
+    let heartbeat_interval = config.heartbeat_interval();
+    let max_reconnect_attempts = config.network.max_reconnect_attempts;
+    let reconnect_timeout = config.reconnect_timeout();
 
     info!(
         fps = config.hardware.fps,
         motion_threshold = motion_threshold,
         buffer_size = config.network.frame_buffer_size,
+        heartbeat_interval_secs = heartbeat_interval.as_secs(),
+        max_reconnect_attempts = max_reconnect_attempts,
         "Starting main loop"
     );
 
@@ -122,12 +173,37 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     // ~2MB should be plenty for 1080p grayscale + mask + contributions
     let mut arena = FrameArena::with_capacity(2 * 1024 * 1024);
 
-    let mut sequence = 0u64;
-    let mut frames_processed = 0u64;
-    let mut last_stats_time = Instant::now();
+    let mut metrics = CameraMetrics::new();
+    let mut last_heartbeat = Instant::now();
 
     loop {
         let frame_start = Instant::now();
+
+        // Check for shutdown signal (non-blocking)
+        // Use poll_fn to check if a signal is ready without blocking
+        if let Some(result) = futures_lite::future::poll_fn(|cx| {
+            use std::pin::Pin;
+            match Pin::new(&mut signals).poll_next(cx) {
+                std::task::Poll::Ready(item) => std::task::Poll::Ready(Some(item)),
+                std::task::Poll::Pending => std::task::Poll::Ready(None),
+            }
+        })
+        .await
+        {
+            match result {
+                Some(Ok(signal)) => {
+                    info!(?signal, "Shutdown signal received, cleaning up...");
+                    break;
+                }
+                Some(Err(e)) => {
+                    warn!("Error receiving signal: {e}");
+                }
+                None => {
+                    // Stream ended unexpectedly
+                    warn!("Signal stream ended unexpectedly");
+                }
+            }
+        }
 
         // Get current pose (fail fast on error)
         let pose = localizer.get_pose()?;
@@ -145,9 +221,11 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
                 let contributions = raymarcher.raymarch(&pose, &mask);
 
                 // Create frame message
+                // Note: sequence is assigned by NetworkClient::send_frame to track
+                // what's actually sent over the wire (survives buffer drops)
                 let frame = CameraFrame {
                     camera_id: config.identity.camera_id,
-                    sequence,
+                    sequence: 0, // Placeholder; set by network layer
                     timestamp: pose.timestamp,
                     pose,
                     contributions,
@@ -158,37 +236,57 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
                 if dropped {
                     warn!("Dropped oldest frame due to backpressure");
                 }
-
-                sequence += 1;
             }
         }
 
         // Try to send buffered frames
-        while let Some(frame) = frame_buffer.pop() {
-            if let Err(e) = network.send_frame(frame).await {
-                error!("Failed to send frame: {e}");
-                return Err(CameraError::Network(e));
+        if let Err(e) = send_buffered_frames(&mut network, &frame_buffer, &mut metrics).await {
+            warn!("Network error during send: {e}");
+
+            // Attempt reconnection
+            match handle_reconnect(
+                &mut network,
+                &registration,
+                max_reconnect_attempts,
+                reconnect_timeout,
+            )
+            .await
+            {
+                Ok(new_grid_config) => {
+                    metrics.reconnect_count += 1;
+                    // Server might have different grid config after restart
+                    if new_grid_config != grid_config {
+                        info!("Grid configuration changed, updating raymarcher");
+                        grid_config = new_grid_config;
+                        raymarcher = create_raymarcher(&config, &grid_config);
+                    }
+                    last_heartbeat = Instant::now();
+                    info!("Reconnected and re-registered successfully");
+                }
+                Err(e) => {
+                    error!("Failed to reconnect: {e}");
+                    return Err(CameraError::Network(e));
+                }
             }
         }
 
-        frames_processed += 1;
+        // Periodic heartbeat
+        if last_heartbeat.elapsed() > heartbeat_interval {
+            if let Err(e) = network.send_heartbeat().await {
+                debug!("Heartbeat failed: {e}");
+                // Don't immediately reconnect - wait for next frame send to fail
+                // This avoids unnecessary reconnects on transient issues
+            }
+            last_heartbeat = Instant::now();
+        }
+
+        metrics.frames_processed += 1;
 
         // Reset arena for next frame
         arena.reset();
 
-        // Periodic stats logging (every 10 seconds)
-        if last_stats_time.elapsed().as_secs() >= 10 {
-            let elapsed = last_stats_time.elapsed().as_secs_f64();
-            let fps = frames_processed as f64 / elapsed;
-            info!(
-                fps = format!("{:.1}", fps),
-                frames = frames_processed,
-                dropped = frame_buffer.dropped_count(),
-                "Stats"
-            );
-            frames_processed = 0;
-            last_stats_time = Instant::now();
-        }
+        // Periodic stats logging
+        metrics.log_stats(&frame_buffer);
 
         // Maintain frame rate
         let elapsed = frame_start.elapsed();
@@ -196,6 +294,74 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
             smol::Timer::after(frame_interval - elapsed).await;
         }
     }
+
+    // Graceful shutdown
+    info!("Closing network connection...");
+    network.close();
+    info!("Shutdown complete");
+
+    Ok(())
+}
+
+/// Send all buffered frames to the server.
+async fn send_buffered_frames(
+    network: &mut NetworkClient,
+    buffer: &DropOldestChannel<CameraFrame>,
+    metrics: &mut CameraMetrics,
+) -> Result<(), NetworkError> {
+    while let Some(frame) = buffer.pop() {
+        network.send_frame(frame).await?;
+        metrics.frames_sent += 1;
+    }
+    Ok(())
+}
+
+/// Handle reconnection with re-registration.
+async fn handle_reconnect(
+    network: &mut NetworkClient,
+    registration: &CameraRegistration,
+    max_attempts: u32,
+    timeout: Duration,
+) -> Result<GridConfigMessage, NetworkError> {
+    info!(
+        max_attempts = max_attempts,
+        timeout_secs = timeout.as_secs(),
+        "Attempting to reconnect..."
+    );
+
+    // Reconnect with backoff
+    network
+        .reconnect_with_backoff(Some(max_attempts), Some(timeout))
+        .await?;
+
+    // Re-register with server
+    info!("Reconnected, re-registering with server...");
+    let grid_config = network.register(registration.clone()).await?;
+
+    Ok(grid_config)
+}
+
+/// Create a raymarcher configured for the server's grid.
+fn create_raymarcher(config: &CameraConfig, grid_config: &GridConfigMessage) -> Raymarcher {
+    let half_dim = Vec3::new(
+        grid_config.dimensions[0] as f32 * grid_config.voxel_size * 0.5,
+        grid_config.dimensions[1] as f32 * grid_config.voxel_size * 0.5,
+        grid_config.dimensions[2] as f32 * grid_config.voxel_size * 0.5,
+    );
+    let grid_bounds = BoundingBox::new(-half_dim, half_dim);
+    let world_origin = GeoPosition::new(
+        grid_config.origin_lat,
+        grid_config.origin_lon,
+        grid_config.origin_alt,
+    );
+
+    Raymarcher::new(
+        config.to_intrinsics_or_default(),
+        config.to_raymarch_config(),
+        grid_bounds,
+        grid_config.voxel_size,
+        world_origin,
+    )
 }
 
 fn create_camera(config: &CameraConfig) -> Box<dyn CameraCapture> {
@@ -232,13 +398,82 @@ fn create_camera(config: &CameraConfig) -> Box<dyn CameraCapture> {
     Box::new(DummyCamera::new(
         width,
         height,
-        Some(config.to_intrinsics()),
+        Some(config.to_intrinsics_or_default()),
     ))
 }
 
 fn create_localizer(config: &CameraConfig) -> Box<dyn Localizer> {
-    // TODO: Use GpsImuLocalizer when GPS device is available
-    // For now, use dummy localizer at configured grid_origin
+    let gps_device = &config.localization.gps_device;
+
+    // Check if gpsd address is configured (contains ':' like "localhost:2947")
+    let use_gpsd = gps_device.contains(':') && !gps_device.starts_with("/dev/");
+
+    if use_gpsd {
+        #[cfg(feature = "real")]
+        {
+            let dead_reckoning_timeout = config.dead_reckoning_timeout();
+
+            // Determine orientation from config (as quaternion)
+            let orientation = config
+                .localization
+                .fixed_orientation
+                .map(|[yaw, pitch, roll]| {
+                    glam::Quat::from_euler(
+                        glam::EulerRot::YXZ,
+                        yaw.to_radians(),
+                        pitch.to_radians(),
+                        roll.to_radians(),
+                    )
+                });
+
+            let mut builder = LocalizerBuilder::new()
+                .with_gpsd(gps_device.clone())
+                .with_fallback_mode(GpsFallbackMode::DeadReckoning)
+                .with_dead_reckoning_timeout(dead_reckoning_timeout);
+
+            if let Some(orient) = orientation {
+                builder = builder.with_fixed_orientation(orient);
+            }
+
+            match builder.build_gpsd_mock_imu() {
+                Ok(localizer) => {
+                    info!(
+                        gps_address = gps_device,
+                        timeout_secs = dead_reckoning_timeout.as_secs(),
+                        "Initialized GPS+IMU localizer with gpsd"
+                    );
+                    return Box::new(localizer);
+                }
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        "Failed to connect to gpsd at {}, falling back to dummy localizer",
+                        gps_device
+                    );
+                }
+            }
+        }
+        #[cfg(not(feature = "real"))]
+        {
+            warn!(
+                gps_address = gps_device,
+                "gpsd support requires the 'real' feature. Using dummy localizer."
+            );
+        }
+    } else if gps_device != "none" && gps_device != "dummy" {
+        // Serial GPS device (e.g., /dev/ttyUSB0) - not yet implemented
+        warn!(
+            gps_device = gps_device,
+            "Serial GPS devices not yet supported. Using dummy localizer at grid_origin."
+        );
+    } else {
+        info!(
+            "GPS disabled (device: {}), using dummy localizer at grid_origin",
+            gps_device
+        );
+    }
+
+    // Fallback: use dummy localizer at configured grid_origin
     let origin = &config.processing.grid_origin;
     Box::new(DummyLocalizer::with_position(
         origin.latitude,
@@ -249,7 +484,7 @@ fn create_localizer(config: &CameraConfig) -> Box<dyn Localizer> {
 
 async fn wait_for_gps(
     localizer: &mut Box<dyn Localizer>,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> Result<iluvatar_core::CameraPose, CameraError> {
     let start = Instant::now();
 
@@ -260,7 +495,7 @@ async fn wait_for_gps(
                 if start.elapsed() > timeout {
                     return Err(CameraError::GpsTimeout(timeout.as_secs()));
                 }
-                smol::Timer::after(std::time::Duration::from_millis(100)).await;
+                smol::Timer::after(Duration::from_millis(100)).await;
             }
             Err(e) => return Err(CameraError::Localization(e)),
         }
@@ -269,11 +504,11 @@ async fn wait_for_gps(
 
 async fn connect_with_timeout(
     network: &mut NetworkClient,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> Result<(), CameraError> {
     let start = Instant::now();
-    let mut delay = std::time::Duration::from_millis(100);
-    let max_delay = std::time::Duration::from_secs(5);
+    let mut delay = Duration::from_millis(100);
+    let max_delay = Duration::from_secs(5);
 
     loop {
         match network.connect().await {
@@ -281,7 +516,7 @@ async fn connect_with_timeout(
             Err(e) => {
                 if start.elapsed() > timeout {
                     error!(
-                        "Connection timeout after {} attempts",
+                        "Connection timeout after {} seconds",
                         start.elapsed().as_secs()
                     );
                     return Err(CameraError::ConnectionTimeout);

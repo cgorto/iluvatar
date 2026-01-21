@@ -9,10 +9,12 @@
 
 use glam::{Quat, UVec2, UVec3, Vec2, Vec3};
 use iluvatar_core::{
-    CameraIntrinsics, CameraPose, DetectionConfig, Fov, GeoPosition, LocalizationStatus,
-    PoseUncertainty, RaymarchConfig, VoxelContribution,
+    CameraIntrinsics, CameraPose, DetectionConfig, DistortionModel, Fov, GeoPosition,
+    LocalizationStatus, PoseUncertainty, RaymarchConfig, VoxelContribution,
 };
-use iluvatar_server::{detector::ObjectDetector, grid::SparseVoxelGrid, tracker::ObjectTracker};
+use iluvatar_server::{
+    detector::ObjectDetector, grid::SparseVoxelGrid, time::Clock, tracker::ObjectTracker,
+};
 use std::f32::consts::PI;
 
 /// A simulated camera that can render a target at a known world position
@@ -56,6 +58,7 @@ impl SimCamera {
                 horizontal: PI / 2.0, // 90 degree FOV
                 vertical: PI / 2.0 * (resolution.1 as f32 / resolution.0 as f32),
             },
+            distortion: DistortionModel::None,
         };
 
         Self {
@@ -234,11 +237,13 @@ fn main() {
     let grid_setup = GridSetup::new(Vec3::ZERO, UVec3::new(1000, 1000, 1000), 1.0);
 
     // Create the server's voxel grid
+    let clock = Clock::new();
     let grid = SparseVoxelGrid::new(
         GeoPosition::new(0.0, 0.0, 0.0),
         grid_setup.dimensions,
         grid_setup.voxel_size,
         0.5, // decay rate
+        clock.clone(),
     );
 
     // Position 4 cameras around the perimeter, all looking at center
@@ -311,7 +316,8 @@ fn main() {
 
     // Run tracker (single frame, so mostly just assigns IDs)
     let mut tracker = ObjectTracker::new(10.0, 30, 60.0);
-    let tracked_objects = tracker.update(detected_objects);
+    let dt = 1.0 / 60.0; // 60 FPS
+    let tracked_objects = tracker.update(detected_objects, dt);
 
     // Report results
     println!("=== Detection Results ===\n");
@@ -396,11 +402,13 @@ fn main() {
         let current_time = frame as u64 * dt_ms;
 
         // Create fresh grid for each frame (simulating decay clearing old data)
+        let frame_clock = Clock::new();
         let frame_grid = SparseVoxelGrid::new(
             GeoPosition::new(0.0, 0.0, 0.0),
             grid_setup.dimensions,
             grid_setup.voxel_size,
             0.5,
+            frame_clock,
         );
 
         // All cameras observe the target
@@ -417,7 +425,8 @@ fn main() {
         let detected = detector2.detect(&points);
 
         // Track
-        let tracked = tracker2.update(detected);
+        let frame_dt = dt_ms as f32 / 1000.0; // Convert ms to seconds
+        let tracked = tracker2.update(detected, frame_dt);
 
         if let Some(obj) = tracked.first() {
             let pos_error = (obj.centroid - current_pos).length();

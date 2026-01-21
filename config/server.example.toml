@@ -1,41 +1,157 @@
 # Iluvatar Server Configuration
+#
+# This example is configured for aircraft tracking at a regional airport.
+# Adjust parameters based on your deployment characteristics.
 
 [server]
 # QUIC listen address for cameras
+# Use 0.0.0.0 to accept connections from any interface
 listen_address = "0.0.0.0:4433"
+
 # WebSocket port for web clients
 websocket_port = 8080
+
 # Update broadcast rate to clients (Hz)
+# 10 Hz provides smooth visualization while limiting bandwidth
 broadcast_rate_hz = 10.0
 
+# TLS certificate paths (required for QUIC)
+# Generate with: openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes
+# cert_path = "/etc/iluvatar/server.crt"
+# key_path = "/etc/iluvatar/server.key"
+
 [grid]
+# Grid origin in WGS84 coordinates
+# Set this to the center of your coverage area
+# Example: center of airport approach corridor
+origin = { latitude = 47.5000, longitude = -122.3000, altitude = 30.0 }
+
+# Grid dimensions in voxels [x, y, z] where:
+#   x = East (positive) / West (negative)
+#   y = North (positive) / South (negative)  
+#   z = Up (positive) / Down (negative)
+#
+# For aircraft tracking with 2m voxels:
+#   [2000, 500, 250] = 4km x 1km x 500m coverage
+dimensions = [2000, 500, 250]
+
 # Voxel size in meters
-voxel_size = 1.0
-# Grid origin (required - center of monitored area)
-origin = { latitude = 47.6062, longitude = -122.3321, altitude = 0.0 }
-# Grid dimensions in voxels [x, y, z]
-dimensions = [1000, 1000, 100]
+# Tradeoffs:
+#   1.0m - High resolution, 8x more voxels than 2m, better for small/slow targets
+#   2.0m - Good balance for aircraft (10-50m wingspan), recommended for approach monitoring
+#   5.0m - Low resolution, use for very large coverage areas with fast targets
+voxel_size = 2.0
+
+# Maximum voxels to prevent memory exhaustion from noisy cameras
+# Default 1M voxels = ~40MB memory at peak
+# Increase if you have large coverage and expect high activity
+max_voxels = 1000000
 
 [decay]
-# Voxel intensity decay rate per second
+# Voxel intensity decay rate per second (exponential decay)
 # Higher = faster decay, lower = more persistence
-# 0.5 gives ~1.4 second half-life
-rate = 0.5
-# Decay update interval in seconds (also triggers detection)
-update_interval = 0.1
+#
+# For aircraft at 60 m/s (120 knots):
+#   Aircraft crosses 2m voxel in 33ms
+#   Want voxels to clear within ~500ms after aircraft passes
+#   rate = 2.0 gives ~350ms half-life
+#
+# For slower targets (vehicles, people):
+#   rate = 0.5 gives ~1.4 second half-life
+rate = 2.0
+
+# Decay update interval in seconds
+# Also controls detection cycle frequency
+# 0.05s = 20 Hz detection rate
+update_interval = 0.05
 
 [detection]
 # Minimum voxel intensity to consider active
-intensity_threshold = 10.0
+# Lower = more sensitive, more false positives
+# Higher = less sensitive, may miss distant targets
+#
+# For aircraft at 1-2km range with 2+ cameras:
+#   intensity_threshold = 5.0 is a good starting point
+#   Increase if getting false positives from noise
+#   Decrease if missing known targets
+intensity_threshold = 5.0
+
 # Minimum number of cameras contributing to trust a detection
+# This is the key filter for eliminating false positives
+#   1 = Single camera can trigger detection (noisy, but useful for debugging)
+#   2 = Require triangulation (recommended minimum for production)
+#   3+ = High confidence, use if you have enough cameras with overlapping coverage
 min_contributors = 2
-# DBSCAN clustering epsilon (meters) - max distance between points in cluster
-cluster_epsilon = 5.0
+
+# DBSCAN clustering epsilon (meters)
+# Maximum distance between points to be considered part of same cluster
+#
+# For aircraft (10-50m size):
+#   15.0m works well - groups the aircraft voxels together
+# For smaller targets (people, small vehicles):
+#   3-5m is more appropriate
+cluster_epsilon = 15.0
+
 # Minimum points to form a cluster
-cluster_min_points = 3
+# Filters out small noise clusters
+#
+# For aircraft with 2m voxels:
+#   5-10 points is reasonable (aircraft fills 5+ voxels)
+# For small targets:
+#   3 points minimum
+cluster_min_points = 5
 
 [tracking]
 # Maximum distance to associate detection with existing track (meters)
-association_threshold = 10.0
+# If detection is within this distance of predicted position, associate it
+#
+# For aircraft at 60 m/s, 60 fps:
+#   Movement per frame = 1m
+#   Allow for position uncertainty: 50m is conservative
+#   Can reduce to 20-30m for slower targets
+association_threshold = 50.0
+
 # Frames before dropping unmatched track
-max_missing_frames = 30
+# How long to maintain a track when target is temporarily not detected
+#
+# At 60 fps:
+#   30 frames = 0.5 seconds (strict, quick cleanup)
+#   120 frames = 2 seconds (tolerant, handles brief occlusions)
+#   300 frames = 5 seconds (very tolerant, for intermittent detections)
+max_missing_frames = 120
+
+# ============================================================================
+# Alternative configurations for different use cases
+# ============================================================================
+
+# --- Slow/small targets (people, vehicles) ---
+# [grid]
+# voxel_size = 1.0
+# dimensions = [500, 500, 50]  # 500m x 500m x 50m
+# 
+# [decay]
+# rate = 0.5
+# update_interval = 0.1
+# 
+# [detection]
+# intensity_threshold = 10.0
+# cluster_epsilon = 5.0
+# cluster_min_points = 3
+# 
+# [tracking]
+# association_threshold = 10.0
+# max_missing_frames = 60
+
+# --- Large area surveillance ---
+# [grid]
+# voxel_size = 5.0
+# dimensions = [2000, 2000, 200]  # 10km x 10km x 1km
+# 
+# [decay]
+# rate = 1.0
+# update_interval = 0.1
+# 
+# [detection]
+# intensity_threshold = 3.0
+# cluster_epsilon = 25.0
+# cluster_min_points = 3

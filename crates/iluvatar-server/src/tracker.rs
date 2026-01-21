@@ -83,7 +83,7 @@ impl ObjectTracker {
         }
 
         // Sort by distance (closest first)
-        matches.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        matches.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Greater));
 
         let mut matched_detection_indices = HashSet::new();
 
@@ -311,5 +311,32 @@ mod tests {
 
         assert!(found_real, "Should have found real object");
         assert!(found_distractor, "Should have found distractor");
+    }
+
+    #[test]
+    fn test_nan_position_handling() {
+        let mut tracker = ObjectTracker::new(5.0, 30, 60.0);
+        let dt = 1.0 / 60.0;
+
+        // First establish a track
+        let objects = tracker.update(vec![make_object(0, Vec3::new(0.0, 0.0, 0.0))], dt);
+        assert_eq!(objects.len(), 1);
+
+        // Now try to match with a detection that has NaN position
+        // This should not panic
+        let nan_obj = TrackedObject {
+            id: 0,
+            centroid: Vec3::new(f32::NAN, 0.0, 0.0),
+            bounding_box: BoundingBox::new(Vec3::ZERO, Vec3::ONE),
+            point_count: 1,
+            total_intensity: 1.0,
+            velocity: None,
+            confidence: 1.0,
+        };
+
+        // This should not panic - NaN detection should be handled gracefully
+        let result = tracker.update(vec![nan_obj], dt);
+        // The NaN object should become a new track (won't match existing due to NaN distance)
+        assert!(!result.is_empty());
     }
 }
