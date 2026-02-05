@@ -1,6 +1,8 @@
 use crate::grid::DEFAULT_MAX_VOXELS;
 use glam::UVec3;
-use iluvatar_core::{DecayConfig, DetectionConfig, GeoPosition, GridConfigMessage};
+use iluvatar_core::{
+    AttenuationConfig, DecayConfig, DetectionConfig, GeoPosition, GridConfigMessage, RaymarchConfig,
+};
 use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
@@ -23,6 +25,10 @@ pub struct ServerConfig {
     pub decay: DecaySettings,
     pub detection: DetectionSettings,
     pub tracking: TrackingSettings,
+    /// Raymarching configuration for server-side raymarching.
+    /// Used when cameras send MotionFrames instead of pre-computed contributions.
+    #[serde(default)]
+    pub raymarch: RaymarchSettings,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +136,42 @@ fn default_max_missing_frames() -> u32 {
     30
 }
 
+/// Raymarching settings for server-side raymarching of MotionFrames.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RaymarchSettings {
+    /// Maximum distance to trace rays (in meters).
+    #[serde(default = "default_raymarch_max_distance")]
+    pub max_distance: f32,
+    /// Attenuation mode: "none", "linear", or "inverse_square".
+    #[serde(default = "default_raymarch_attenuation")]
+    pub attenuation: String,
+    /// Reference distance for inverse-square attenuation.
+    #[serde(default = "default_raymarch_reference_distance")]
+    pub reference_distance: f32,
+}
+
+impl Default for RaymarchSettings {
+    fn default() -> Self {
+        Self {
+            max_distance: default_raymarch_max_distance(),
+            attenuation: default_raymarch_attenuation(),
+            reference_distance: default_raymarch_reference_distance(),
+        }
+    }
+}
+
+fn default_raymarch_max_distance() -> f32 {
+    500.0
+}
+
+fn default_raymarch_attenuation() -> String {
+    "none".to_string()
+}
+
+fn default_raymarch_reference_distance() -> f32 {
+    10.0
+}
+
 impl ServerConfig {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
@@ -176,6 +218,25 @@ impl ServerConfig {
             origin_alt: self.grid.origin.altitude,
             dimensions: self.grid.dimensions,
             voxel_size: self.grid.voxel_size,
+        }
+    }
+
+    /// Convert server raymarch settings to the core RaymarchConfig.
+    pub fn to_raymarch_config(&self) -> RaymarchConfig {
+        let attenuation = match self.raymarch.attenuation.as_str() {
+            "linear" => AttenuationConfig::Linear {
+                max_distance: self.raymarch.max_distance,
+            },
+            "inverse_square" => AttenuationConfig::InverseSquare {
+                reference_distance: self.raymarch.reference_distance,
+            },
+            _ => AttenuationConfig::None,
+        };
+
+        RaymarchConfig {
+            max_distance: self.raymarch.max_distance,
+            step_size: 0.0, // Unused by DDA algorithm.
+            attenuation,
         }
     }
 }

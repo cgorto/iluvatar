@@ -78,12 +78,13 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
         .parse()
         .map_err(|e| ServerError::Network(format!("Invalid listen address: {}", e)))?;
     let grid_config = config.to_grid_config_message();
+    let raymarch_config = config.to_raymarch_config();
     let registry_clone = registry.clone();
     let msg_tx_clone = msg_tx.clone();
     smol::spawn(async move {
         match QuicServer::bind(listen_addr, None).await {
             Ok(server) => {
-                if let Err(e) = server.run(msg_tx_clone, registry_clone, grid_config).await {
+                if let Err(e) = server.run(msg_tx_clone, registry_clone, grid_config, raymarch_config).await {
                     error!("QUIC server error: {}", e);
                 }
             }

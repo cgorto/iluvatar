@@ -74,17 +74,15 @@ impl CameraRegistry {
         }
     }
 
-    /// Register a new camera
+    /// Register a camera. Allows re-registration after reconnect by updating
+    /// the existing entry (insert-or-update semantics).
     pub fn register(&mut self, registration: CameraRegistration) -> bool {
-        // Verify protocol version
+        // Verify protocol version.
         if registration.version != iluvatar_core::PROTOCOL_VERSION {
             return false;
         }
 
-        if self.cameras.contains_key(&registration.camera_id) {
-            return false;
-        }
-
+        // Insert or update — allows re-registration after reconnect.
         self.cameras
             .insert(registration.camera_id, CameraState::new(registration));
         true

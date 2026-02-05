@@ -48,7 +48,7 @@ impl FrameAggregator {
         let camera_id = frame.camera_id;
         let frame_ts = frame.timestamp;
 
-        // Validate camera ID fits in bitmask (same pattern as grid.rs)
+        // Validate camera ID fits in bitmask (same pattern as grid.rs).
         if camera_id >= 64 {
             tracing::warn!(
                 "Camera ID {} exceeds maximum of 63 (64-camera limit), ignoring frame",
@@ -59,13 +59,13 @@ impl FrameAggregator {
 
         self.active_cameras.insert(camera_id, now);
 
-        // Prune inactive cameras (haven't heard from in 2 seconds)
+        // Prune inactive cameras (haven't heard from in 2 seconds).
         self.active_cameras
             .retain(|_, last_seen| now.duration_since(*last_seen) < Duration::from_secs(2));
 
-        // Try to add to an existing batch
+        // Try to add to an existing batch.
         for batch in &mut self.buffer {
-            // Check if frame timestamp is within window of batch timestamp
+            // Check if frame timestamp is within window of batch timestamp.
             let diff = if frame_ts > batch.timestamp {
                 frame_ts - batch.timestamp
             } else {
@@ -73,19 +73,18 @@ impl FrameAggregator {
             };
 
             if diff <= self.sync_window_micros {
-                // Check if we already have a frame from this camera in this batch
+                // Each camera contributes at most once per batch (checked by bitmask).
+                // Take ownership of the frame instead of cloning.
                 if (batch.contributors & (1 << camera_id)) == 0 {
-                    batch.frames.push(frame.clone());
+                    batch.frames.push(frame);
                     batch.contributors |= 1 << camera_id;
                     return;
-                } else {
-                    // Duplicate frame from same camera for this timeslot? Update it?
-                    // For now, ignore duplicates or newer frames for same slot
                 }
+                // Duplicate frame from same camera for this timeslot — ignore.
             }
         }
 
-        // Create new batch
+        // Create new batch.
         self.buffer.push_back(FrameBatch {
             timestamp: frame_ts,
             frames: vec![frame],

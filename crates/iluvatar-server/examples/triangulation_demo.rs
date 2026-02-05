@@ -399,7 +399,7 @@ fn main() {
 
     for frame in 0..10 {
         let current_pos = start_pos + velocity * frame as f32;
-        let current_time = frame as u64 * dt_ms;
+        let _current_time = frame as u64 * dt_ms;
 
         // Create fresh grid for each frame (simulating decay clearing old data)
         let frame_clock = Clock::new();

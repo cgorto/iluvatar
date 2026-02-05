@@ -1,5 +1,14 @@
+use iluvatar_core::{CameraFrame, MotionFrame};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+
+/// Frame ready to be sent to the server, in either v1 or v2 format.
+pub enum OutboundFrame {
+    /// Pre-computed voxel contributions (camera-side raymarching).
+    Voxel(CameraFrame),
+    /// Raw motion pixels (server-side raymarching).
+    Motion(MotionFrame),
+}
 
 /// A bounded channel that drops the oldest item when full.
 ///

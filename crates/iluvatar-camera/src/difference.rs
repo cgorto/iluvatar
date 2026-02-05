@@ -1,5 +1,54 @@
 use crate::arena::FrameArena;
 use crate::capture::GrayscaleFrame;
+#[allow(unused_imports)]
+use crate::profile_scope;
+
+#[cfg(feature = "simd")]
+mod simd {
+    use core::simd::{prelude::*, Select};
+
+    const LANES: usize = 32;
+
+    /// SIMD-accelerated frame difference with threshold.
+    ///
+    /// Computes `|current[i] - previous[i]|` for each pixel and writes the
+    /// difference to `mask[i]` if it exceeds `threshold`, otherwise writes 0.
+    ///
+    /// On RISC-V with the V extension, this compiles to vectorized
+    /// vle8/vmaxu/vminu/vsub/vmsgtu/vmerge/vse8 instructions, processing
+    /// 32 pixels per iteration (LMUL=2 on VLEN=128).
+    ///
+    /// # Safety
+    /// The `target_feature` attribute is used to enable vector instructions
+    /// only for this function, avoiding LLVM crashes in dependency crates.
+    #[cfg_attr(target_arch = "riscv64", target_feature(enable = "v"))]
+    pub unsafe fn diff_threshold(current: &[u8], previous: &[u8], mask: &mut [u8], threshold: u8) {
+        let len = current.len().min(previous.len()).min(mask.len());
+        let thresh = Simd::<u8, LANES>::splat(threshold);
+        let zero = Simd::<u8, LANES>::splat(0);
+
+        let chunks = len / LANES;
+        let remainder = len % LANES;
+
+        for i in 0..chunks {
+            let offset = i * LANES;
+            let va = Simd::<u8, LANES>::from_slice(&current[offset..]);
+            let vb = Simd::<u8, LANES>::from_slice(&previous[offset..]);
+            // abs_diff = max(a,b) - min(a,b)
+            let diff = va.simd_max(vb) - va.simd_min(vb);
+            let above = diff.simd_gt(thresh);
+            let result = above.select(diff, zero);
+            mask[offset..offset + LANES].copy_from_slice(result.as_array());
+        }
+
+        // Scalar remainder
+        let start = chunks * LANES;
+        for i in start..start + remainder {
+            let diff = current[i].abs_diff(previous[i]);
+            mask[i] = if diff > threshold { diff } else { 0 };
+        }
+    }
+}
 
 /// Difference mask storing motion detection results
 pub struct DifferenceMask<S> {
@@ -166,21 +215,40 @@ impl FrameProcessor {
                 None
             } else {
                 let mut mask = DifferenceMask::new_in(arena, current.width, current.height);
-                let mask_data = mask.data.as_mut();
 
-                for (i, (curr, prev)) in current
-                    .pixels()
-                    .iter()
-                    .zip(previous.pixels().iter())
-                    .enumerate()
                 {
-                    let diff = curr.abs_diff(*prev);
-                    if diff > self.threshold {
-                        mask_data[i] = diff;
+                    profile_scope!("diff_pixels");
+                    #[cfg(feature = "simd")]
+                    {
+                        // SAFETY: The `simd` feature is only enabled when building for
+                        // a target with RISC-V V extension support (verified via /proc/cpuinfo).
+                        unsafe {
+                            simd::diff_threshold(
+                                current.pixels(),
+                                previous.pixels(),
+                                mask.data.as_mut(),
+                                self.threshold,
+                            );
+                        }
+                    }
+
+                    #[cfg(not(feature = "simd"))]
+                    {
+                        let mask_data = mask.data.as_mut();
+                        for (i, (curr, prev)) in current
+                            .pixels()
+                            .iter()
+                            .zip(previous.pixels().iter())
+                            .enumerate()
+                        {
+                            let diff = curr.abs_diff(*prev);
+                            mask_data[i] = if diff > self.threshold { diff } else { 0 };
+                        }
                     }
                 }
 
                 if self.min_neighbors > 0 {
+                    profile_scope!("noise_filter");
                     mask.filter_noise(self.min_neighbors, &mut self.noise_filter_buffer);
                 }
 
@@ -192,21 +260,24 @@ impl FrameProcessor {
 
         // Update previous frame
         // We need to store an owned copy of the current frame
-        if let Some(ref mut prev) = self.previous_frame {
-            if prev.width == current.width && prev.height == current.height {
-                // Reuse allocation
-                prev.data.copy_from_slice(current.pixels());
+        {
+            profile_scope!("copy_frame");
+            if let Some(ref mut prev) = self.previous_frame {
+                if prev.width == current.width && prev.height == current.height {
+                    // Reuse allocation
+                    prev.data.copy_from_slice(current.pixels());
+                } else {
+                    // Reallocate
+                    let mut new_prev = GrayscaleFrame::new(current.width, current.height);
+                    new_prev.data.copy_from_slice(current.pixels());
+                    self.previous_frame = Some(new_prev);
+                }
             } else {
-                // Reallocate
+                // First frame
                 let mut new_prev = GrayscaleFrame::new(current.width, current.height);
                 new_prev.data.copy_from_slice(current.pixels());
                 self.previous_frame = Some(new_prev);
             }
-        } else {
-            // First frame
-            let mut new_prev = GrayscaleFrame::new(current.width, current.height);
-            new_prev.data.copy_from_slice(current.pixels());
-            self.previous_frame = Some(new_prev);
         }
 
         result

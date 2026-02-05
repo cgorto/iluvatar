@@ -1,7 +1,7 @@
 use async_compat::Compat;
 use iluvatar_core::{
-    CameraFrame, CameraId, CameraMessage, CameraRegistration, GridConfigMessage, ServerMessage,
-    protocol,
+    CameraFrame, CameraId, CameraMessage, CameraRegistration, FrameFormat, GridConfigMessage,
+    MotionFrame, ServerMessage, protocol,
 };
 use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -38,6 +38,13 @@ pub enum ConnectionState {
     Connecting,
     Connected,
     Reconnecting { attempts: u32 },
+}
+
+/// Response from server registration, containing grid config and format preference.
+#[derive(Debug, Clone)]
+pub struct RegistrationResponse {
+    pub grid_config: GridConfigMessage,
+    pub format: FrameFormat,
 }
 
 /// Network client for camera-to-server communication over QUIC.
@@ -135,11 +142,17 @@ impl NetworkClient {
         Ok(())
     }
 
-    /// Send camera registration and receive grid configuration.
+    /// Send camera registration and receive grid configuration and format preference.
+    ///
+    /// The server may respond with either:
+    /// - `ServerMessage::GridConfig` (v1 server): defaults to VoxelContributions format
+    /// - `ServerMessage::RegisteredWithPrefs` (v2 server): includes format preference
+    ///
+    /// Both responses are normalized into a `RegistrationResponse`.
     pub async fn register(
         &mut self,
         mut registration: CameraRegistration,
-    ) -> Result<GridConfigMessage, NetworkError> {
+    ) -> Result<RegistrationResponse, NetworkError> {
         registration.version = protocol::PROTOCOL_VERSION;
 
         let conn = self
@@ -147,13 +160,13 @@ impl NetworkClient {
             .as_ref()
             .ok_or_else(|| NetworkError::Connection("Not connected".into()))?;
 
-        // Open bidirectional stream for registration
+        // Open bidirectional stream for registration.
         let (mut send, mut recv) = conn
             .open_bi()
             .await
             .map_err(|e| NetworkError::Connection(format!("Failed to open stream: {}", e)))?;
 
-        // Send registration message
+        // Send registration message.
         let msg = CameraMessage::Register(registration);
         let data = protocol::serialize(&msg)?;
         let framed = protocol::write_framed(&data)?;
@@ -164,21 +177,52 @@ impl NetworkClient {
         send.finish()
             .map_err(|_| NetworkError::Send("Failed to finish send stream".into()))?;
 
-        debug!("Registration sent, waiting for grid config...");
+        debug!("Registration sent, waiting for server response...");
 
-        // Receive grid config response
+        // Receive response (may be GridConfig or RegisteredWithPrefs).
         let response_data = protocol::read_framed(&mut recv).await?;
         let response: ServerMessage = protocol::deserialize(&response_data)?;
 
         match response {
             ServerMessage::GridConfig(config) => {
+                // v1 server: no format preference, default to VoxelContributions.
                 info!(
                     origin = format!("{:.6}, {:.6}", config.origin_lat, config.origin_lon),
                     dimensions = ?config.dimensions,
                     voxel_size = config.voxel_size,
-                    "Received grid configuration"
+                    format = ?FrameFormat::VoxelContributions,
+                    "Received grid configuration (v1 response)"
                 );
-                Ok(config)
+                Ok(RegistrationResponse {
+                    grid_config: config,
+                    format: FrameFormat::VoxelContributions,
+                })
+            }
+            ServerMessage::RegisteredWithPrefs { camera_id: _, preferences } => {
+                // v2 server: read a second message for grid config.
+                let grid_data = protocol::read_framed(&mut recv).await?;
+                let grid_msg: ServerMessage = protocol::deserialize(&grid_data)?;
+
+                let config = match grid_msg {
+                    ServerMessage::GridConfig(config) => config,
+                    _ => {
+                        return Err(NetworkError::Protocol(
+                            "Expected GridConfig after RegisteredWithPrefs".into(),
+                        ));
+                    }
+                };
+
+                info!(
+                    origin = format!("{:.6}, {:.6}", config.origin_lat, config.origin_lon),
+                    dimensions = ?config.dimensions,
+                    voxel_size = config.voxel_size,
+                    format = ?preferences.preferred_format,
+                    "Received grid configuration (v2 response)"
+                );
+                Ok(RegistrationResponse {
+                    grid_config: config,
+                    format: preferences.preferred_format,
+                })
             }
             ServerMessage::Error { code, message } => Err(NetworkError::Protocol(format!(
                 "Server error {}: {}",
@@ -213,6 +257,39 @@ impl NetworkClient {
         send.write_all(&framed)
             .await
             .map_err(|e| NetworkError::Send(format!("Failed to write frame: {}", e)))?;
+
+        send.finish()
+            .map_err(|_| NetworkError::Send("Failed to finish stream".into()))?;
+
+        Ok(())
+    }
+
+    /// Send a motion frame to the server using a unidirectional stream.
+    pub async fn send_motion_frame(
+        &mut self,
+        mut frame: MotionFrame,
+    ) -> Result<(), NetworkError> {
+        let conn = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| NetworkError::Connection("Not connected".into()))?;
+
+        frame.sequence = self.sequence;
+        self.sequence += 1;
+
+        let msg = CameraMessage::Motion(frame);
+        let data = protocol::serialize(&msg)?;
+        let framed = protocol::write_framed(&data)?;
+
+        // Open unidirectional stream (fire-and-forget).
+        let mut send = conn
+            .open_uni()
+            .await
+            .map_err(|e| NetworkError::Send(format!("Failed to open stream: {}", e)))?;
+
+        send.write_all(&framed)
+            .await
+            .map_err(|e| NetworkError::Send(format!("Failed to write motion frame: {}", e)))?;
 
         send.finish()
             .map_err(|_| NetworkError::Send("Failed to finish stream".into()))?;

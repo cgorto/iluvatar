@@ -1,4 +1,6 @@
 use crate::arena::FrameArena;
+#[allow(unused_imports)]
+use crate::profile_scope;
 use glam::Vec3;
 use iluvatar_core::{CameraIntrinsics, CameraPose};
 use thiserror::Error;
@@ -10,7 +12,7 @@ use v4l::{
     Device,
     buffer::Type,
     format::FourCC,
-    io::traits::{CaptureStream, Stream as StreamTrait},
+    io::traits::CaptureStream,
     video::Capture,
 };
 
@@ -238,28 +240,54 @@ impl V4L2Camera {
 
         let device = Box::new(device);
 
-        // Request specific format
-        let format = device
+        // Always set the capture format explicitly. The ISP may report a default
+        // (e.g. NV16 @ 1920x1080) that doesn't match what we need, and some ISP
+        // drivers require S_FMT to finalize the pipeline configuration.
+        //
+        // Some ISP drivers (e.g. K230 vvcam) do not enumerate formats via
+        // VIDIOC_ENUM_FMT even though S_FMT succeeds. When enumeration returns
+        // an empty list, fall through to setting NV12 directly.
+        let formats = device
             .enum_formats()
-            .map_err(|e| CaptureError::DeviceOpen(e.to_string()))?
-            .into_iter()
-            .find(|f| f.fourcc == FourCC::new(b"YUYV") || f.fourcc == FourCC::new(b"MJPG"))
-            .ok_or_else(|| {
-                CaptureError::UnsupportedFormat(
-                    "No supported format (YUYV or MJPG) found".to_string(),
-                )
-            })?;
+            .map_err(|e| CaptureError::DeviceOpen(e.to_string()))?;
+        let preferred = [
+            FourCC::new(b"NV12"),
+            FourCC::new(b"YUYV"),
+            FourCC::new(b"MJPG"),
+        ];
+        let chosen_fourcc = match preferred
+            .iter()
+            .find_map(|pref| formats.iter().find(|f| &f.fourcc == pref))
+        {
+            Some(desc) => desc.fourcc,
+            None => {
+                // Driver enumerated no supported formats. Try NV12 via S_FMT
+                // directly — the driver may still accept it.
+                tracing::warn!(
+                    "VIDIOC_ENUM_FMT returned no supported formats. \
+                     Attempting NV12 via S_FMT directly."
+                );
+                FourCC::new(b"NV12")
+            }
+        };
 
         let mut fmt = device
             .format()
             .map_err(|e| CaptureError::DeviceOpen(e.to_string()))?;
         fmt.width = width;
         fmt.height = height;
-        fmt.fourcc = format.fourcc;
+        fmt.fourcc = chosen_fourcc;
 
         let fmt = device
             .set_format(&fmt)
             .map_err(|e| CaptureError::Format(e.to_string()))?;
+
+        tracing::info!(
+            width = fmt.width,
+            height = fmt.height,
+            fourcc = ?fmt.fourcc,
+            "V4L2 format configured"
+        );
 
         // Build the self-referential struct safely using ouroboros
         let inner = V4L2CameraInnerTryBuilder {
@@ -271,21 +299,16 @@ impl V4L2Camera {
         }
         .try_build()?;
 
-        let mut camera = Self {
+        // Don't call stream.start() here — the v4l crate's next() method
+        // handles initialization internally: it queues all buffers first, then
+        // calls STREAMON. Calling start() manually bypasses buffer queuing,
+        // which causes the ISP driver to hang after one frame.
+        Ok(Self {
             inner,
             width: fmt.width,
             height: fmt.height,
             format: fmt.fourcc,
-        };
-
-        // Start the stream
-        camera.inner.with_stream_mut(|stream| {
-            stream
-                .start()
-                .map_err(|e| CaptureError::Capture(e.to_string()))
-        })?;
-
-        Ok(camera)
+        })
     }
 }
 
@@ -300,16 +323,31 @@ impl CameraCapture for V4L2Camera {
         arena: &'a FrameArena,
         _pose: &CameraPose,
     ) -> Result<GrayscaleFrame<&'a mut [u8]>, CaptureError> {
-        let (buf, _meta) = self.inner.with_stream_mut(|stream| {
-            stream
-                .next()
-                .map_err(|e| CaptureError::Capture(e.to_string()))
-        })?;
+        let (buf, _meta) = {
+            profile_scope!("v4l2_next");
+            self.inner.with_stream_mut(|stream| {
+                stream
+                    .next()
+                    .map_err(|e| CaptureError::Capture(e.to_string()))
+            })?
+        };
 
+        profile_scope!("format_convert");
         let mut frame = GrayscaleFrame::new_in(arena, self.width, self.height);
         let target = frame.pixels_mut();
 
         match self.format {
+            // NV12: Y plane (width*height) followed by interleaved UV plane
+            // Grayscale = just the Y plane, which is the first width*height bytes
+            f if f == FourCC::new(b"NV12") => {
+                let count = (self.width as usize) * (self.height as usize);
+                if buf.len() < count {
+                    return Err(CaptureError::Capture(
+                        "Buffer too small for NV12 Y plane".to_string(),
+                    ));
+                }
+                target.copy_from_slice(&buf[..count]);
+            }
             // YUYV: Y0 U0 Y1 V1
             // We want Y0, Y1...
             f if f == FourCC::new(b"YUYV") => {

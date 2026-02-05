@@ -1,0 +1,39 @@
+# K230 Camera Configuration (development/testing)
+
+[identity]
+camera_id = 1
+
+[hardware]
+device = "/dev/video1"
+width = 640
+height = 480
+fps = 30
+
+[localization]
+gps_device = "dummy"
+gps_timeout_secs = 5
+dead_reckoning_timeout_secs = 30
+
+[processing]
+difference_threshold = 25
+motion_threshold_fraction = 0.001
+
+[processing.grid_origin]
+latitude = 47.6062
+longitude = -122.3321
+altitude = 0.0
+
+[processing.raymarch]
+max_distance = 500.0
+step_size = 0.5
+
+[network]
+server_address = "192.168.0.185:4433"
+connection_timeout_secs = 10
+frame_buffer_size = 4
+max_reconnect_attempts = 3
+reconnect_timeout_secs = 30
+heartbeat_interval_secs = 15
+
+[network.tls]
+dangerous_skip_verification = true

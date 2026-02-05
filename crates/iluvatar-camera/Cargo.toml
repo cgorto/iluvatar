@@ -13,6 +13,9 @@ path = "src/main.rs"
 default = ["sim"]
 sim = []
 real = ["dep:v4l", "dep:gpsd_proto", "dep:serde_json"]
+k230 = ["dep:cc"]  # K230 SDK VICAP backend (requires cross-compilation)
+simd = []
+profile = ["dep:tracy-client"]  # Tracy profiler integration
 
 [dependencies]
 iluvatar-core = { workspace = true }
@@ -58,3 +61,9 @@ fastrand = "2.1"
 # GPS via gpsd
 gpsd_proto = { version = "1.0", optional = true }
 serde_json = { version = "1.0", optional = true }
+
+# Profiling
+tracy-client = { version = "0.18", optional = true, default-features = false, features = ["enable"] }
+
+[build-dependencies]
+cc = { version = "1.0", optional = true }

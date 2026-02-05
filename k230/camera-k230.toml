@@ -1,0 +1,47 @@
+# K230 Camera Configuration (VICAP SDK backend)
+#
+# This configuration uses the K230 SDK's VICAP API for hardware-accelerated
+# camera capture, bypassing V4L2 for better performance.
+
+[identity]
+camera_id = 1
+
+[hardware]
+# Use "k230" to enable the VICAP SDK backend (requires k230 feature)
+# Use "/dev/video1" for V4L2 fallback
+device = "k230"
+width = 1280
+height = 720
+fps = 30
+
+[localization]
+gps_device = "dummy"
+gps_timeout_secs = 5
+dead_reckoning_timeout_secs = 30
+
+[processing]
+difference_threshold = 25
+motion_threshold_fraction = 0.001
+
+[processing.grid_origin]
+# Seattle coordinates (adjust for your deployment)
+latitude = 47.6062
+longitude = -122.3321
+altitude = 0.0
+
+[processing.raymarch]
+max_distance = 500.0
+step_size = 0.5
+
+[network]
+# Server address (adjust for your setup)
+server_address = "192.168.0.185:4433"
+connection_timeout_secs = 10
+frame_buffer_size = 4
+max_reconnect_attempts = 3
+reconnect_timeout_secs = 30
+heartbeat_interval_secs = 15
+
+[network.tls]
+# WARNING: Skip verification only for development!
+dangerous_skip_verification = true
