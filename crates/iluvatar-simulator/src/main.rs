@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{asset::AssetPlugin, prelude::*};
 use iluvatar_simulator::{RenderSimulatorPlugin, SimulatorPlugin, SimulatorTomlConfig};
 use std::path::Path;
 
@@ -15,18 +15,25 @@ fn main() {
 
     let mut app = App::new();
 
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: if use_render_mode {
-                "Iluvatar Simulator (Render Mode)".to_string()
-            } else {
-                "Iluvatar Simulator (Geometric Mode)".to_string()
-            },
-            resolution: (1280u32, 720u32).into(),
-            ..default()
-        }),
-        ..default()
-    }));
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: if use_render_mode {
+                        "Iluvatar Simulator (Render Mode)".to_string()
+                    } else {
+                        "Iluvatar Simulator (Geometric Mode)".to_string()
+                    },
+                    resolution: (1280u32, 720u32).into(),
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(AssetPlugin {
+                file_path: "crates/iluvatar-simulator/assets".to_string(),
+                ..default()
+            }),
+    );
 
     // Load simulator TOML config if provided
     if let Some(path) = &config_path {

@@ -112,7 +112,12 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     );
 
     // Set up signal handler for graceful shutdown
+    // On Windows, only Signal::Int (Ctrl+C) is supported; Signal::Term is Unix-only
+    #[cfg(unix)]
     let mut signals = Signals::new([Signal::Term, Signal::Int])
+        .map_err(|e| CameraError::System(format!("Failed to set up signal handler: {}", e)))?;
+    #[cfg(windows)]
+    let mut signals = Signals::new([Signal::Int])
         .map_err(|e| CameraError::System(format!("Failed to set up signal handler: {}", e)))?;
 
     // Initialize components

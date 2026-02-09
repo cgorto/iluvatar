@@ -1,0 +1,86 @@
+# Iluvatar Docker Compose
+#
+# Runs the server and 5 camera processes in containers.
+# The simulator runs natively on the host (needs GPU/Bevy).
+#
+# Usage:
+#   1. Start simulator natively: cargo run -p iluvatar-simulator -- --render --config config/simulator.toml
+#   2. docker compose up --build
+#   3. Web client: http://localhost:8080
+#   4. docker compose down
+
+services:
+  server:
+    build: .
+    command: ["/app/iluvatar-server", "/config/server.toml"]
+    ports:
+      - "4433:4433/udp"   # QUIC for cameras (also accessible from host)
+      - "8080:8080"       # WebSocket for web clients
+    volumes:
+      - ./config/server.toml:/config/server.toml:ro
+    networks:
+      - iluvatar-net
+
+  cam-0:
+    build: .
+    command: ["/app/iluvatar-camera", "/config/camera.toml"]
+    volumes:
+      - ./config/docker/cam-0.toml:/config/camera.toml:ro
+    depends_on:
+      - server
+    networks:
+      - iluvatar-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  cam-1:
+    build: .
+    command: ["/app/iluvatar-camera", "/config/camera.toml"]
+    volumes:
+      - ./config/docker/cam-1.toml:/config/camera.toml:ro
+    depends_on:
+      - server
+    networks:
+      - iluvatar-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  cam-2:
+    build: .
+    command: ["/app/iluvatar-camera", "/config/camera.toml"]
+    volumes:
+      - ./config/docker/cam-2.toml:/config/camera.toml:ro
+    depends_on:
+      - server
+    networks:
+      - iluvatar-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  cam-3:
+    build: .
+    command: ["/app/iluvatar-camera", "/config/camera.toml"]
+    volumes:
+      - ./config/docker/cam-3.toml:/config/camera.toml:ro
+    depends_on:
+      - server
+    networks:
+      - iluvatar-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  cam-4:
+    build: .
+    command: ["/app/iluvatar-camera", "/config/camera.toml"]
+    volumes:
+      - ./config/docker/cam-4.toml:/config/camera.toml:ro
+    depends_on:
+      - server
+    networks:
+      - iluvatar-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  iluvatar-net:
+    driver: bridge

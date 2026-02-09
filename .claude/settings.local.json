@@ -11,7 +11,10 @@
       "Bash(export PATH=\"/c/Users/dgort/.cargo/bin:$PATH\")",
       "WebSearch",
       "Bash(cargo clippy:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(powershell:*)",
+      "Bash(python:*)",
+      "Bash(cargo test:*)"
     ]
   }
 }

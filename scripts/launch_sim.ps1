@@ -17,6 +17,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# ---- Ensure cargo is in PATH ----
+$cargoPath = "$env:USERPROFILE\.cargo\bin"
+if (Test-Path $cargoPath) {
+    $env:PATH = "$cargoPath;$env:PATH"
+}
+
 # ---- Parse TOML config (minimal parser for what we need) ----
 
 if (-not (Test-Path $Config)) {
@@ -27,11 +33,11 @@ if (-not (Test-Path $Config)) {
 Write-Host "Reading config from $Config" -ForegroundColor Cyan
 $content = Get-Content $Config -Raw
 
-# Extract server address
+# Extract server address (resolve "localhost" to 127.0.0.1 since QUIC client needs IP:port)
 if ($content -match 'address\s*=\s*"([^"]+)"') {
-    $serverAddress = $Matches[1]
+    $serverAddress = $Matches[1] -replace '^localhost:', '127.0.0.1:'
 } else {
-    $serverAddress = "localhost:4433"
+    $serverAddress = "127.0.0.1:4433"
 }
 
 # Extract grid origin
@@ -79,24 +85,44 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# ---- Locate built binaries ----
+$targetDir = "target\debug"
+$serverBin = "$targetDir\iluvatar-server.exe"
+$simBin = "$targetDir\iluvatar-simulator.exe"
+$cameraBin = "$targetDir\iluvatar-camera.exe"
+
+foreach ($bin in @($serverBin, $simBin, $cameraBin)) {
+    if (-not (Test-Path $bin)) {
+        Write-Error "Binary not found: $bin (did the build succeed?)"
+        exit 1
+    }
+}
+
 $processes = @()
 $tempFiles = @()
 
 try {
+    # Project root (where assets/ lives) — needed for Bevy asset loading
+    $projectRoot = (Get-Location).Path
+
     # ---- Start server ----
     Write-Host "`nStarting iluvatar-server..." -ForegroundColor Green
-    $serverProc = Start-Process -FilePath "cargo" -ArgumentList "run -p iluvatar-server" `
+    $serverProc = Start-Process -FilePath $serverBin -WorkingDirectory $projectRoot `
         -PassThru -NoNewWindow
     $processes += $serverProc
     Start-Sleep -Seconds 2
 
     # ---- Start simulator ----
     Write-Host "Starting iluvatar-simulator (render mode)..." -ForegroundColor Green
-    $simProc = Start-Process -FilePath "cargo" `
-        -ArgumentList "run -p iluvatar-simulator -- --render --config $Config" `
+    $simProc = Start-Process -FilePath $simBin `
+        -ArgumentList "--render --config $Config" `
+        -WorkingDirectory $projectRoot `
         -PassThru -NoNewWindow
     $processes += $simProc
-    Start-Sleep -Seconds 3
+
+    # Wait for simulator TCP servers to be ready
+    Write-Host "Waiting for simulator TCP frame servers to start..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 8
 
     # ---- Start camera processes ----
     foreach ($cam in $cameras) {
@@ -173,8 +199,8 @@ dangerous_skip_verification = true
         $configContent | Set-Content -Path $tmpConfig -Encoding UTF8
         Write-Host "Starting camera $camId (tcp:localhost:$($cam.stream_port), config=$tmpConfig)..." -ForegroundColor Green
 
-        $camProc = Start-Process -FilePath "cargo" `
-            -ArgumentList "run -p iluvatar-camera -- $tmpConfig" `
+        $camProc = Start-Process -FilePath $cameraBin `
+            -ArgumentList $tmpConfig `
             -PassThru -NoNewWindow
         $processes += $camProc
 

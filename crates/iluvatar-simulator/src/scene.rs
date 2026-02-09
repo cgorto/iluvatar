@@ -83,7 +83,7 @@ fn setup_scene(
             ..default()
         },
         FreeCamera::default(),
-        Transform::from_xyz(0.0, 80.0, 120.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(0.0, 300.0, 600.0).looking_at(Vec3::new(0.0, 150.0, 0.0), Vec3::Y),
         // Debug camera sees everything: layers 0, 1, and 2
         debug_camera_layers(),
     ));
