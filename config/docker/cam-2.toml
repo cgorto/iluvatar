@@ -1,0 +1,48 @@
+# Camera 2 - Docker configuration
+# Position: (500, 2, -500), looking at (0, 250, 0)
+
+[identity]
+camera_id = 2
+
+[hardware]
+device = "tcp:host.docker.internal:9003"
+width = 1280
+height = 720
+fps = 60
+
+[hardware.calibration]
+model = "pinhole"
+fx = 640.0
+fy = 639.94
+cx = 640.0
+cy = 360.0
+distortion = []
+
+[localization]
+gps_device = "none"
+gps_timeout_secs = 1
+fixed_orientation = [-135.0, 19.33, 0.0]
+
+[processing]
+difference_threshold = 25
+motion_threshold_fraction = 0.001
+
+[processing.grid_origin]
+latitude = 0.0
+longitude = 0.0
+altitude = 0.0
+
+[processing.raymarch]
+max_distance = 1500.0
+step_size = 0.5
+
+[network]
+server_address = "server:4433"
+connection_timeout_secs = 30
+frame_buffer_size = 4
+max_reconnect_attempts = 100
+reconnect_timeout_secs = 1800
+heartbeat_interval_secs = 15
+
+[network.tls]
+dangerous_skip_verification = true

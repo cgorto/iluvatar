@@ -34,6 +34,7 @@ use bevy::{
 use iluvatar_core::{CameraIntrinsics, DistortionModel, Fov};
 
 use crate::render_layers::render_camera_layers;
+use crate::sim_config::SimulatorTomlConfig;
 
 /// Plugin that sets up render-to-texture cameras with GPU motion detection
 pub struct RenderCameraPlugin;
@@ -119,12 +120,17 @@ impl RenderCamera {
     }
 }
 
-/// Camera placement configuration
-struct CameraPlacement {
-    position: Vec3,
-    look_at: Vec3,
-    color: Color,
-}
+/// Palette of colors for camera visualization markers
+const CAMERA_COLORS: &[Color] = &[
+    Color::srgb(0.8, 0.2, 0.2), // Red
+    Color::srgb(0.2, 0.8, 0.2), // Green
+    Color::srgb(0.2, 0.2, 0.8), // Blue
+    Color::srgb(0.8, 0.8, 0.2), // Yellow
+    Color::srgb(0.8, 0.2, 0.8), // Magenta
+    Color::srgb(0.2, 0.8, 0.8), // Cyan
+    Color::srgb(0.9, 0.5, 0.1), // Orange
+    Color::srgb(0.5, 0.9, 0.1), // Lime
+];
 
 // =============================================================================
 // Texture Creation Helpers
@@ -203,72 +209,57 @@ fn create_difference_mask_image(resolution: UVec2) -> Image {
 // Camera Spawning
 // =============================================================================
 
-/// Spawn render cameras positioned around the scene
+/// Spawn render cameras from `SimulatorTomlConfig` (if present) or use defaults.
 fn spawn_render_cameras(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     config: Res<RenderCameraConfig>,
+    sim_toml: Option<Res<SimulatorTomlConfig>>,
 ) {
-    // Camera placements - positioned around the scene
-    let placements = [
-        CameraPlacement {
-            position: Vec3::new(-500.0, 2.0, -500.0),
-            look_at: Vec3::new(0.0, 250.0, 0.0),
-            color: Color::srgb(0.8, 0.2, 0.2), // Red
-        },
-        //^^^ this is the trouble maker
-        CameraPlacement {
-            position: Vec3::new(-250.0, 3.0, -490.0),
-            look_at: Vec3::new(0.0, 250.0, 0.0),
-            color: Color::srgb(0.8, 0.2, 0.2), // Red
-        },
-        CameraPlacement {
-            position: Vec3::new(500.0, 2.0, -500.0),
-            look_at: Vec3::new(0.0, 250.0, 0.0),
-            color: Color::srgb(0.2, 0.8, 0.2), // Green
-        },
-        CameraPlacement {
-            position: Vec3::new(500.0, 2.0, 500.0),
-            look_at: Vec3::new(0.0, 250.0, 0.0),
-            color: Color::srgb(0.2, 0.2, 0.8), // Blue
-        },
-        CameraPlacement {
-            position: Vec3::new(-500.0, 2.0, 500.0),
-            look_at: Vec3::new(0.0, 250.0, 0.0),
-            color: Color::srgb(0.8, 0.8, 0.2), // Yellow
-        },
-    ];
+    // Build camera list from TOML config or fall back to defaults
+    let cameras: Vec<CameraSpawnInfo> = if let Some(toml) = sim_toml.as_ref() {
+        toml.cameras
+            .iter()
+            .map(|entry| CameraSpawnInfo {
+                id: entry.id,
+                position: entry.position_vec3(),
+                look_at: entry.look_at_vec3(),
+                fov_h: entry.fov_h_rad(),
+                fov_v: entry.fov_v_rad(),
+                resolution: entry.resolution_uvec2(),
+                stream_port: Some(entry.stream_port),
+            })
+            .collect()
+    } else {
+        default_render_camera_spawn_infos(config.resolution)
+    };
 
-    // Mesh for camera visualization (a small box to show where cameras are)
     let camera_mesh = meshes.add(Cuboid::new(3.0, 2.0, 4.0));
 
-    for (id, placement) in placements.iter().enumerate() {
-        // Create all three GPU textures for this camera
-        let render_target = images.add(create_render_target_image(config.resolution));
-        let previous_frame = images.add(create_previous_frame_image(config.resolution));
-        let difference_mask = images.add(create_difference_mask_image(config.resolution));
+    for cam in &cameras {
+        let resolution = cam.resolution;
+
+        // Create all three GPU textures for this camera at its own resolution
+        let render_target = images.add(create_render_target_image(resolution));
+        let previous_frame = images.add(create_previous_frame_image(resolution));
+        let difference_mask = images.add(create_difference_mask_image(resolution));
 
         let transform =
-            Transform::from_translation(placement.position).looking_at(placement.look_at, Vec3::Y);
+            Transform::from_translation(cam.position).looking_at(cam.look_at, Vec3::Y);
 
-        // Calculate FOV from resolution (fixed horizontal FOV, derive vertical)
-        let aspect = config.resolution.x as f32 / config.resolution.y as f32;
-        let fov_x = std::f32::consts::FRAC_PI_2;
-        let fov_y = 2.0 * ((fov_x / 2.0).tan() / aspect).atan();
+        let fov_x = cam.fov_h;
+        let fov_y = cam.fov_v;
+        let aspect = resolution.x as f32 / resolution.y as f32;
 
-        let focal_length_x = (config.resolution.x as f32 / 2.0) / (fov_x / 2.0).tan();
-        let focal_length_y = (config.resolution.y as f32 / 2.0) / (fov_y / 2.0).tan();
+        let focal_length_x = (resolution.x as f32 / 2.0) / (fov_x / 2.0).tan();
+        let focal_length_y = (resolution.y as f32 / 2.0) / (fov_y / 2.0).tan();
 
-        // Create camera intrinsics
         let intrinsics = CameraIntrinsics {
             focal_length: Vec2::new(focal_length_x, focal_length_y),
-            principal_point: Vec2::new(
-                config.resolution.x as f32 / 2.0,
-                config.resolution.y as f32 / 2.0,
-            ),
-            resolution: config.resolution,
+            principal_point: Vec2::new(resolution.x as f32 / 2.0, resolution.y as f32 / 2.0),
+            resolution,
             fov: Fov {
                 horizontal: fov_x,
                 vertical: fov_y,
@@ -278,25 +269,23 @@ fn spawn_render_cameras(
 
         let render_camera = RenderCamera {
             intrinsics,
-            camera_id: id as u32,
+            camera_id: cam.id,
             render_target: render_target.clone(),
             previous_frame: previous_frame.clone(),
             difference_mask: difference_mask.clone(),
-            resolution: config.resolution,
+            resolution,
             difference_threshold: config.difference_threshold,
             subsample: config.subsample,
             has_previous: false,
         };
 
-        // Spawn camera entity - NO texture readback (GPU pipeline handles everything)
         commands.spawn((
             Camera3d::default(),
             Camera {
-                order: -(id as isize + 1), // Render before main camera (negative order)
+                order: -(cam.id as isize + 1),
                 ..default()
             },
             Msaa::Sample8,
-            // Render to our texture instead of the window
             RenderTarget::Image(render_target.clone().into()),
             Projection::Perspective(PerspectiveProjection {
                 fov: fov_y,
@@ -307,27 +296,74 @@ fn spawn_render_cameras(
             }),
             transform,
             render_camera,
-            // CRITICAL: Render cameras see layers 0 (scene) and 1 (targets), NOT layer 2 (debug)
             render_camera_layers(),
         ));
 
-        // Spawn a visual marker for the camera (so we can see where it is)
+        let color = CAMERA_COLORS[cam.id as usize % CAMERA_COLORS.len()];
         commands.spawn((
             Mesh3d(camera_mesh.clone()),
-            MeshMaterial3d(materials.add(placement.color)),
-            Transform::from_translation(placement.position),
+            MeshMaterial3d(materials.add(color)),
+            Transform::from_translation(cam.position),
         ));
 
         info!(
-            "Spawned render camera {} at {:?} with GPU frame buffers ({}x{})",
-            id, placement.position, config.resolution.x, config.resolution.y
+            "Spawned render camera {} at {:?} ({}x{}, FOV {:.0}x{:.0}°{})",
+            cam.id,
+            cam.position,
+            resolution.x,
+            resolution.y,
+            cam.fov_h.to_degrees(),
+            cam.fov_v.to_degrees(),
+            cam.stream_port
+                .map(|p| format!(", stream_port={}", p))
+                .unwrap_or_default(),
         );
     }
 
     info!(
         "Spawned {} render cameras with GPU motion detection pipeline",
-        placements.len()
+        cameras.len()
     );
+}
+
+/// Internal helper holding everything needed to spawn one render camera.
+struct CameraSpawnInfo {
+    id: u32,
+    position: Vec3,
+    look_at: Vec3,
+    fov_h: f32,
+    fov_v: f32,
+    resolution: UVec2,
+    stream_port: Option<u16>,
+}
+
+/// Default camera placements when no TOML config is provided (backwards compatible).
+fn default_render_camera_spawn_infos(resolution: UVec2) -> Vec<CameraSpawnInfo> {
+    let aspect = resolution.x as f32 / resolution.y as f32;
+    let fov_h = std::f32::consts::FRAC_PI_2;
+    let fov_v = 2.0 * ((fov_h / 2.0).tan() / aspect).atan();
+
+    let positions = [
+        Vec3::new(-500.0, 2.0, -500.0),
+        Vec3::new(-250.0, 3.0, -490.0),
+        Vec3::new(500.0, 2.0, -500.0),
+        Vec3::new(500.0, 2.0, 500.0),
+        Vec3::new(-500.0, 2.0, 500.0),
+    ];
+
+    positions
+        .iter()
+        .enumerate()
+        .map(|(i, &pos)| CameraSpawnInfo {
+            id: i as u32,
+            position: pos,
+            look_at: Vec3::new(0.0, 250.0, 0.0),
+            fov_h,
+            fov_v,
+            resolution,
+            stream_port: None,
+        })
+        .collect()
 }
 
 // =============================================================================

@@ -53,6 +53,7 @@ pub struct NetworkClient {
     endpoint: Option<Endpoint>,
     connection: Option<Connection>,
     server_addr: SocketAddr,
+    server_addr_str: String,
     camera_id: CameraId,
     state: ConnectionState,
     sequence: u64,
@@ -63,28 +64,36 @@ impl NetworkClient {
     /// Create a new network client.
     ///
     /// # Arguments
-    /// * `server_addr` - Server address in "host:port" format
+    /// * `server_addr` - Server address in "host:port" format (supports hostnames and IPs)
     /// * `camera_id` - Unique identifier for this camera
     /// * `tls_config` - TLS configuration for certificate verification
     ///
     /// # Errors
-    /// Returns an error if the server address is invalid or TLS configuration is invalid.
+    /// Returns an error if the TLS configuration is invalid.
     pub fn new(
         server_addr: String,
         camera_id: CameraId,
         tls_config: TlsConfig,
     ) -> Result<Self, NetworkError> {
-        let addr: SocketAddr = server_addr.parse().map_err(|e| {
-            NetworkError::Connection(format!("Invalid server address '{}': {}", server_addr, e))
-        })?;
-
         // Validate TLS configuration
         validate_tls_config(&tls_config)?;
+
+        // Try to parse as SocketAddr directly; if that fails, resolve at connect time
+        let addr = server_addr
+            .parse::<SocketAddr>()
+            .or_else(|_| resolve_hostname(&server_addr))
+            .map_err(|e| {
+                NetworkError::Connection(format!(
+                    "Invalid server address '{}': {}",
+                    server_addr, e
+                ))
+            })?;
 
         Ok(Self {
             endpoint: None,
             connection: None,
             server_addr: addr,
+            server_addr_str: server_addr,
             camera_id,
             state: ConnectionState::Disconnected,
             sequence: 0,
@@ -103,6 +112,24 @@ impl NetworkClient {
     /// Connect to the server using QUIC.
     pub async fn connect(&mut self) -> Result<(), NetworkError> {
         self.state = ConnectionState::Connecting;
+
+        // Re-resolve hostname on each connection attempt (supports DNS changes/Docker)
+        if self.server_addr_str.parse::<SocketAddr>().is_err() {
+            match resolve_hostname(&self.server_addr_str) {
+                Ok(addr) => {
+                    if addr != self.server_addr {
+                        info!(old = %self.server_addr, new = %addr, "Server address resolved to new IP");
+                    }
+                    self.server_addr = addr;
+                }
+                Err(e) => {
+                    return Err(NetworkError::Connection(format!(
+                        "Failed to resolve '{}': {}",
+                        self.server_addr_str, e
+                    )));
+                }
+            }
+        }
 
         // Create endpoint if we don't have one (needs tokio runtime via Compat)
         if self.endpoint.is_none() {
@@ -424,6 +451,18 @@ impl NetworkClient {
             false
         }
     }
+}
+
+/// Resolve a hostname:port string to a SocketAddr.
+///
+/// Supports both `IP:port` and `hostname:port` formats. For hostnames,
+/// uses the system resolver (which handles Docker service names, /etc/hosts, DNS, etc.).
+fn resolve_hostname(addr: &str) -> Result<SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    addr.to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for '{}': {}", addr, e))?
+        .next()
+        .ok_or_else(|| format!("No addresses found for '{}'", addr))
 }
 
 /// Validate TLS configuration.
@@ -763,6 +802,15 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, NetworkError::Connection(_)));
+    }
+
+    #[test]
+    fn test_network_client_new_hostname() {
+        // Hostnames with ports should be resolved (localhost always resolves)
+        let result = NetworkClient::new("localhost:8080".to_string(), 1, test_tls_config());
+        assert!(result.is_ok());
+        let client = result.unwrap();
+        assert_eq!(client.server_addr_str, "localhost:8080");
     }
 
     #[test]

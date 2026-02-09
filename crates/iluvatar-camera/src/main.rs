@@ -13,13 +13,9 @@ use iluvatar_camera::{
     debug::DebugSender,
     difference::FrameProcessor,
     localization::{DummyLocalizer, Localizer},
-    network::{NetworkClient, NetworkError, RegistrationResponse},
-    profile_frame, profile_plot, profile_scope,
-    raymarch::{Raymarcher, raymarch_from_mask},
-};
-use iluvatar_core::{
-    BoundingBox, CameraFrame, CameraRegistration, FrameFormat, GeoPosition, GridConfigMessage,
-    MotionData, MotionFrame, MAX_CONTRIBUTIONS_PER_FRAME,
+    network::{NetworkClient, NetworkError},
+    raymarch::Raymarcher,
+    tcp_camera::TcpCamera,
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -118,7 +114,13 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     );
 
     // Set up signal handler for graceful shutdown.
+    // Set up signal handler for graceful shutdown
+    // On Windows, only Signal::Int (Ctrl+C) is supported; Signal::Term is Unix-only
+    #[cfg(unix)]
     let mut signals = Signals::new([Signal::Term, Signal::Int])
+        .map_err(|e| CameraError::System(format!("Failed to set up signal handler: {}", e)))?;
+    #[cfg(windows)]
+    let mut signals = Signals::new([Signal::Int])
         .map_err(|e| CameraError::System(format!("Failed to set up signal handler: {}", e)))?;
 
     // Initialize components.
@@ -557,6 +559,24 @@ fn create_camera(config: &CameraConfig) -> Box<dyn CameraCapture> {
 
     // V4L2 backend.
     if device.starts_with("/dev/video") {
+    // TCP camera: device = "tcp:host:port"
+    if let Some((host, port)) = TcpCamera::parse_device(device) {
+        match TcpCamera::new(host, port, width, height) {
+            Ok(cam) => {
+                info!(
+                    "Initialized TCP camera at {}:{} ({}x{})",
+                    host, port, width, height
+                );
+                return Box::new(cam);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to connect to TCP camera at {}:{}: {}. Falling back to dummy.",
+                    host, port, e
+                );
+            }
+        }
+    } else if device.starts_with("/dev/video") {
         #[cfg(all(target_os = "linux", feature = "real"))]
         {
             match iluvatar_camera::capture::V4L2Camera::new(device, width, height) {

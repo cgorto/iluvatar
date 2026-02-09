@@ -12,6 +12,7 @@ pub mod localization;
 pub mod network;
 pub mod profile;
 pub mod raymarch;
+pub mod tcp_camera;
 
 pub use arena::FrameArena;
 pub use channel::DropOldestChannel;

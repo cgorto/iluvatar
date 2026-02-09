@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(cargo --version:*)",
+      "Bash(cargo run:*)",
+      "Bash(tasklist:*)",
+      "Bash(git checkout:*)",
+      "Bash(cargo check:*)",
+      "Bash(where.exe:*)",
+      "Bash(export PATH=\"/c/Users/dgort/.cargo/bin:$PATH\")",
+      "WebSearch",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo build:*)",
+      "Bash(powershell:*)",
+      "Bash(python:*)",
+      "Bash(cargo test:*)"
+    ]
+  }
+}

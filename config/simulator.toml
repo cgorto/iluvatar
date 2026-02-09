@@ -1,0 +1,52 @@
+[grid]
+origin = [0.0, 0.0, 0.0]
+dimensions = [500, 300, 500]
+voxel_size = 1.0
+
+[server]
+address = "localhost:4433"
+
+[[cameras]]
+id = 0
+position = [-500.0, 2.0, -500.0]
+look_at = [0.0, 250.0, 0.0]
+fov_horizontal = 90.0
+fov_vertical = 58.72
+resolution = [1280, 720]
+stream_port = 9001
+
+[[cameras]]
+id = 1
+position = [-250.0, 3.0, -490.0]
+look_at = [0.0, 250.0, 0.0]
+fov_horizontal = 90.0
+fov_vertical = 58.72
+resolution = [1280, 720]
+stream_port = 9002
+
+[[cameras]]
+id = 2
+position = [500.0, 2.0, -500.0]
+look_at = [0.0, 250.0, 0.0]
+fov_horizontal = 90.0
+fov_vertical = 58.72
+resolution = [1280, 720]
+stream_port = 9003
+
+[[cameras]]
+id = 3
+position = [500.0, 2.0, 500.0]
+look_at = [0.0, 250.0, 0.0]
+fov_horizontal = 90.0
+fov_vertical = 58.72
+resolution = [1280, 720]
+stream_port = 9004
+
+[[cameras]]
+id = 4
+position = [-500.0, 2.0, 500.0]
+look_at = [0.0, 250.0, 0.0]
+fov_horizontal = 90.0
+fov_vertical = 58.72
+resolution = [1280, 720]
+stream_port = 9005
