@@ -6,6 +6,7 @@ pub mod capture;
 pub mod capture_k230;
 pub mod channel;
 pub mod config;
+pub mod debug;
 pub mod difference;
 pub mod localization;
 pub mod network;

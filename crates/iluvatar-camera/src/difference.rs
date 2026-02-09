@@ -87,6 +87,71 @@ where
         self.data.as_ref().iter().filter(|&&v| v > 0).count()
     }
 
+    /// Max-pool motion pixels into a downsampled grid.
+    ///
+    /// Each `factor x factor` block is reduced to a single pixel holding the
+    /// maximum intensity found anywhere in the block. Coordinates are mapped
+    /// back to original resolution (`block_x * factor`, `block_y * factor`) so
+    /// server intrinsics remain valid.
+    ///
+    /// The caller provides a pre-allocated `pool` buffer (sized for the
+    /// downsampled dimensions) to avoid per-frame allocation. The buffer is
+    /// cleared, filled, and then yielded as `(x, y, intensity)` tuples.
+    ///
+    /// A `factor` of 1 is a pass-through: the buffer is unused and the full-
+    /// resolution `motion_pixels()` iterator is returned directly via the
+    /// right variant of the enum.
+    /// Max-pool motion pixels into a downsampled grid.
+    ///
+    /// Each `factor x factor` block is reduced to a single pixel holding the
+    /// maximum intensity found anywhere in the block. Coordinates are mapped
+    /// back to original resolution (`block_x * factor`, `block_y * factor`) so
+    /// server intrinsics remain valid.
+    ///
+    /// The caller provides a pre-allocated `pool` buffer to avoid per-frame
+    /// allocation. It is cleared and resized as needed.
+    ///
+    /// A `factor` of 1 is a valid identity operation (pool equals full mask).
+    pub fn motion_pixels_pooled<'b>(
+        &self,
+        factor: u32,
+        pool: &'b mut Vec<u8>,
+    ) -> PooledMotionPixels<'b> {
+        assert!(factor >= 1);
+
+        let pooled_width  = self.width.div_ceil(factor);
+        let pooled_height = self.height.div_ceil(factor);
+        let pooled_len = (pooled_width * pooled_height) as usize;
+
+        // Reuse the buffer, resizing only if the dimensions changed.
+        pool.resize(pooled_len, 0);
+        pool.fill(0);
+
+        let data = self.data.as_ref();
+        let width = self.width;
+
+        // Single pass over motion pixels: assign each to its block, keep max.
+        for (i, &value) in data.iter().enumerate() {
+            if value > 0 {
+                let x = (i as u32) % width;
+                let y = (i as u32) / width;
+                let bx = x / factor;
+                let by = y / factor;
+                let bi = (by * pooled_width + bx) as usize;
+                if value > pool[bi] {
+                    pool[bi] = value;
+                }
+            }
+        }
+
+        PooledMotionPixels {
+            pool,
+            pooled_width,
+            factor,
+            index: 0,
+        }
+    }
+
     /// Filter out isolated pixels (noise)
     /// Performs a single pass of erosion: pixels must have at least `min_neighbors` active neighbors
     /// (out of 8) to survive.
@@ -173,13 +238,47 @@ impl<'a> DifferenceMask<&'a mut [u8]> {
     }
 }
 
+/// Iterator over max-pooled motion pixels.
+///
+/// Walks a downsampled buffer and emits non-zero cells with coordinates
+/// scaled back to original resolution.
+pub struct PooledMotionPixels<'a> {
+    pool: &'a [u8],
+    pooled_width: u32,
+    factor: u32,
+    index: usize,
+}
+
+impl Iterator for PooledMotionPixels<'_> {
+    type Item = (u32, u32, u8);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.pool.len() {
+            let i = self.index;
+            self.index += 1;
+            let value = self.pool[i];
+            if value > 0 {
+                let bx = (i as u32) % self.pooled_width;
+                let by = (i as u32) / self.pooled_width;
+                let x = bx * self.factor;
+                let y = by * self.factor;
+                return Some((x, y, value));
+            }
+        }
+        None
+    }
+}
+
 /// Frame processor for computing difference masks
 pub struct FrameProcessor {
     previous_frame: Option<GrayscaleFrame<Vec<u8>>>,
     threshold: u8,
     min_neighbors: u8,
-    /// Pre-allocated buffer for noise filtering to avoid per-frame allocations
+    /// Pre-allocated buffer for noise filtering to avoid per-frame allocations.
     noise_filter_buffer: Vec<usize>,
+    /// Pre-allocated buffer for motion pixel max-pooling.
+    /// Sized to `ceil(width / factor) * ceil(height / factor)` on first use.
+    pub pool_buffer: Vec<u8>,
 }
 
 impl FrameProcessor {
@@ -189,6 +288,7 @@ impl FrameProcessor {
             threshold,
             min_neighbors: 2, // Default to requiring 2 neighbors
             noise_filter_buffer: Vec::new(),
+            pool_buffer: Vec::new(),
         }
     }
 

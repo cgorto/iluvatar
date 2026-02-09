@@ -11,7 +11,7 @@ pub use iluvatar_core::raymarch::Raymarcher;
 /// This is a convenience wrapper that adapts the camera's DifferenceMask
 /// into the iterator-based `Raymarcher::raymarch_pixels` method from core.
 pub fn raymarch_from_mask<S>(
-    raymarcher: &Raymarcher,
+    raymarcher: &mut Raymarcher,
     pose: &CameraPose,
     mask: &DifferenceMask<S>,
 ) -> Vec<VoxelContribution>
@@ -28,8 +28,8 @@ mod tests {
     use glam::{Quat, UVec2, Vec2, Vec3};
     use iluvatar_core::{
         BoundingBox, CameraIntrinsics, CameraPose, DistortionModel, Fov, GeoPosition,
-        LocalizationStatus, MAX_CONTRIBUTIONS_PER_FRAME, PoseUncertainty, RaymarchConfig,
-        Timestamp,
+        LocalizationStatus, PoseUncertainty, RaymarchConfig, Timestamp,
+        MAX_CONTRIBUTIONS_PER_FRAME,
     };
     fn test_intrinsics() -> CameraIntrinsics {
         CameraIntrinsics {
@@ -91,7 +91,7 @@ mod tests {
     fn test_level_camera_center_ray_points_north() {
         // Verifies that the core Raymarcher was correctly extracted by checking
         // a fundamental property: level camera center ray points North.
-        let raymarcher = Raymarcher::new(
+        let mut raymarcher = Raymarcher::new(
             test_intrinsics(),
             RaymarchConfig::default(),
             BoundingBox::new(Vec3::ZERO, Vec3::splat(100.0)),
@@ -108,7 +108,10 @@ mod tests {
 
         // The center ray of a level camera facing North should produce contributions
         // that are roughly aligned along the Y axis (North in ENU).
-        assert!(!result.is_empty(), "Center pixel should produce contributions");
+        assert!(
+            !result.is_empty(),
+            "Center pixel should produce contributions"
+        );
     }
 
     #[test]
@@ -116,7 +119,7 @@ mod tests {
         // Camera at altitude 100m, grid extends 0-200m in all axes.
         // A level camera facing North from Z=100 sends center ray along +Y,
         // which passes through the grid at height 100.
-        let raymarcher = Raymarcher::new(
+        let mut raymarcher = Raymarcher::new(
             test_intrinsics(),
             RaymarchConfig::default(),
             BoundingBox::new(Vec3::ZERO, Vec3::splat(200.0)),
@@ -135,7 +138,7 @@ mod tests {
         // Camera at altitude 50m, grid extends 0-100m. Level camera facing North.
         // Left (x=200) and right (x=1720) pixels at wide horizontal angles
         // diverge into different voxel columns as the ray travels forward.
-        let raymarcher = Raymarcher::new(
+        let mut raymarcher = Raymarcher::new(
             test_intrinsics(),
             RaymarchConfig::default(),
             BoundingBox::new(Vec3::ZERO, Vec3::splat(100.0)),

@@ -128,6 +128,14 @@ impl CameraRegistry {
         self.cameras.len()
     }
 
+    /// Check if a camera is currently connected.
+    pub fn is_connected(&self, camera_id: CameraId) -> bool {
+        self.cameras
+            .get(&camera_id)
+            .map(|c| matches!(c.connection, ConnectionState::Connected { .. }))
+            .unwrap_or(false)
+    }
+
     /// Get connected camera count
     pub fn connected_count(&self) -> usize {
         self.cameras

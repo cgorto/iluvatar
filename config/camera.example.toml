@@ -125,6 +125,20 @@ dead_reckoning_timeout_secs = 30
 # For aircraft at 1-2km, the apparent motion is small, so use lower threshold
 difference_threshold = 25
 
+# Stride-based downsample factor for motion pixels before sending.
+# Only pixels on a regular grid (every Nth column and row) are included,
+# reducing the pixel count sent over the wire by factor².
+#
+# The motion threshold check runs on the full-resolution mask — downsampling
+# only affects what is transmitted, not whether motion is detected.
+# Coordinates are kept in original resolution so server intrinsics work unchanged.
+#
+#   1 = no downsampling (all motion pixels sent)
+#   2 = 4x reduction (~quarter of pixels)
+#   4 = 16x reduction (recommended — matches simulator GPU subsample)
+#   8 = 64x reduction (very coarse, may miss small targets)
+motion_downsample = 4
+
 # Minimum fraction of frame with motion before transmitting (0.0-1.0)
 # Frames with less motion than this are not sent (saves bandwidth)
 #
@@ -313,3 +327,17 @@ dangerous_skip_verification = false
 # latitude = 47.5010
 # longitude = -122.2990
 # altitude = 55.0     # Tower is 25m above ground (30m field elevation)
+
+# ============================================================================
+# Debug Viewer (optional — zero overhead when omitted)
+# ============================================================================
+#
+# Stream downsampled difference masks to a host-side viewer over TCP for
+# real-time visual debugging. The camera connects to the viewer as a TCP
+# client. If the viewer is unreachable, frames are silently skipped.
+#
+# Run the viewer on the host: cargo run -p iluvatar-viewer
+#
+# [debug]
+# viewer_address = "192.168.0.185:9100"  # Host machine running iluvatar-viewer
+# downsample_factor = 2                  # 2 = half resolution (e.g., 640x480 → 320x240)

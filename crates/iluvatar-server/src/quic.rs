@@ -1,11 +1,9 @@
 use async_channel::Sender;
 use async_compat::Compat;
-use glam::Vec3;
 use iluvatar_core::{
-    BoundingBox, CameraFrame, CameraMessage, CameraRegistration, FrameFormat, GeoPosition,
-    GridConfigMessage, RaymarchConfig, ServerMessage, ServerPreferences,
+    CameraMessage, CameraRegistration, FrameFormat, GridConfigMessage, ServerMessage,
+    ServerPreferences,
     protocol::{self, FrameError},
-    raymarch::Raymarcher,
 };
 use parking_lot::RwLock;
 use quinn::{Endpoint, ServerConfig};
@@ -62,12 +60,16 @@ impl QuicServer {
     }
 
     /// Run the server, accepting camera connections and forwarding messages.
+    ///
+    /// The QUIC handler is a thin pipe: it deserializes messages and forwards
+    /// them to the channel. No heavy processing (e.g. raymarching) happens
+    /// here, keeping QUIC flow control windows open and preventing backpressure
+    /// from stalling camera sends.
     pub async fn run(
         self,
         msg_tx: Sender<CameraMessage>,
         registry: Arc<RwLock<CameraRegistry>>,
         grid_config: GridConfigMessage,
-        raymarch_config: RaymarchConfig,
     ) -> Result<(), QuicError> {
         info!("QUIC server running, waiting for camera connections...");
 
@@ -77,7 +79,6 @@ impl QuicServer {
                 let msg_tx = msg_tx.clone();
                 let registry = registry.clone();
                 let grid_config = grid_config.clone();
-                let raymarch_config = raymarch_config.clone();
 
                 // Spawn connection handler inside tokio-compatible context.
                 smol::spawn(Compat::new(async move {
@@ -86,7 +87,6 @@ impl QuicServer {
                         msg_tx,
                         registry,
                         grid_config,
-                        raymarch_config,
                     )
                     .await
                     {
@@ -103,41 +103,11 @@ impl QuicServer {
     }
 }
 
-/// Build a Raymarcher from a registration's intrinsics and the server's config.
-fn create_server_raymarcher(
-    registration: &CameraRegistration,
-    grid_config: &GridConfigMessage,
-    raymarch_config: &RaymarchConfig,
-) -> Raymarcher {
-    let half_dim = Vec3::new(
-        grid_config.dimensions[0] as f32 * grid_config.voxel_size * 0.5,
-        grid_config.dimensions[1] as f32 * grid_config.voxel_size * 0.5,
-        grid_config.dimensions[2] as f32 * grid_config.voxel_size * 0.5,
-    );
-    let grid_bounds = BoundingBox::new(-half_dim, half_dim);
-    let world_origin = GeoPosition::new(
-        grid_config.origin_lat,
-        grid_config.origin_lon,
-        grid_config.origin_alt,
-    );
-
-    // No contribution limit on the server — the grid capacity is the real bound.
-    Raymarcher::new(
-        registration.intrinsics,
-        raymarch_config.clone(),
-        grid_bounds,
-        grid_config.voxel_size,
-        world_origin,
-        usize::MAX,
-    )
-}
-
 async fn handle_connection(
     incoming: quinn::Incoming,
     msg_tx: Sender<CameraMessage>,
     registry: Arc<RwLock<CameraRegistry>>,
     grid_config: GridConfigMessage,
-    raymarch_config: RaymarchConfig,
 ) -> Result<(), ConnectionHandlerError> {
     let connection = incoming.await?;
     let remote = connection.remote_address();
@@ -182,18 +152,11 @@ async fn handle_connection(
         });
     }
 
-    // Decide frame format and create per-connection raymarcher if needed.
-    let raymarcher: Option<Raymarcher>;
-
+    // Send response based on camera capabilities.
     if supports_motion {
-        // v2 camera: tell it to send MotionPixels, create server-side raymarcher.
-        raymarcher = Some(create_server_raymarcher(
-            &registration,
-            &grid_config,
-            &raymarch_config,
-        ));
-
-        // Send RegisteredWithPrefs first, then GridConfig.
+        // v2 camera: tell it to send MotionPixels. Raymarching happens in the
+        // main processing loop, not here — keeping this handler fast so QUIC
+        // flow control windows stay open.
         let prefs_response = ServerMessage::RegisteredWithPrefs {
             camera_id,
             preferences: ServerPreferences {
@@ -202,23 +165,24 @@ async fn handle_connection(
                 max_motion_pixels: None,
             },
         };
-        let prefs_data =
-            protocol::serialize(&prefs_response).map_err(ConnectionHandlerError::Serialize)?;
+        let prefs_data = protocol::serialize(&prefs_response)
+            .map_err(ConnectionHandlerError::Serialize)?;
         let prefs_framed = protocol::write_framed(&prefs_data)?;
         send.write_all(&prefs_framed)
             .await
             .map_err(ConnectionHandlerError::Write)?;
 
         let grid_response = ServerMessage::GridConfig(grid_config.clone());
-        let grid_data =
-            protocol::serialize(&grid_response).map_err(ConnectionHandlerError::Serialize)?;
+        let grid_data = protocol::serialize(&grid_response)
+            .map_err(ConnectionHandlerError::Serialize)?;
         let grid_framed = protocol::write_framed(&grid_data)?;
         send.write_all(&grid_framed)
             .await
             .map_err(ConnectionHandlerError::Write)?;
 
-        send.finish()
-            .map_err(|_| ConnectionHandlerError::Protocol("Failed to finish stream".into()))?;
+        send.finish().map_err(|_| {
+            ConnectionHandlerError::Protocol("Failed to finish stream".into())
+        })?;
 
         debug!(
             camera_id = camera_id,
@@ -226,17 +190,16 @@ async fn handle_connection(
         );
     } else {
         // v1 camera: send GridConfig only (existing behavior).
-        raymarcher = None;
-
         let response = ServerMessage::GridConfig(grid_config.clone());
-        let response_data =
-            protocol::serialize(&response).map_err(ConnectionHandlerError::Serialize)?;
+        let response_data = protocol::serialize(&response)
+            .map_err(ConnectionHandlerError::Serialize)?;
         let framed = protocol::write_framed(&response_data)?;
         send.write_all(&framed)
             .await
             .map_err(ConnectionHandlerError::Write)?;
-        send.finish()
-            .map_err(|_| ConnectionHandlerError::Protocol("Failed to finish stream".into()))?;
+        send.finish().map_err(|_| {
+            ConnectionHandlerError::Protocol("Failed to finish stream".into())
+        })?;
 
         debug!(
             camera_id = camera_id,
@@ -244,7 +207,8 @@ async fn handle_connection(
         );
     }
 
-    // Forward the registration message to the channel.
+    // Forward the registration message to the main loop, which creates a
+    // per-camera raymarcher if needed.
     let _ = msg_tx
         .send(CameraMessage::Register(CameraRegistration {
             version: registration.version,
@@ -256,6 +220,8 @@ async fn handle_connection(
         .await;
 
     // Main receive loop: accept unidirectional streams for frame data.
+    // This is a fast deserialize-and-forward loop. No heavy computation
+    // happens here — messages are forwarded as-is to the processing channel.
     loop {
         let recv_result = connection.accept_uni().await;
         let mut recv = match recv_result {
@@ -290,34 +256,17 @@ async fn handle_connection(
         let msg: CameraMessage = match protocol::deserialize(&frame_data) {
             Ok(m) => m,
             Err(e) => {
-                warn!(camera_id = camera_id, error = %e, "Failed to deserialize frame");
+                warn!(
+                    camera_id = camera_id,
+                    error = %e,
+                    "Failed to deserialize frame"
+                );
                 continue;
             }
         };
 
-        // If we have a per-connection raymarcher, convert MotionFrames to CameraFrames.
-        let msg_to_forward = match (&raymarcher, msg) {
-            (Some(rm), CameraMessage::Motion(motion_frame)) => {
-                // Server-side raymarching: convert motion pixels to voxel contributions.
-                let contributions =
-                    rm.raymarch_motion_pixels(&motion_frame.pose, &motion_frame.motion.pixels().collect::<Vec<_>>());
-
-                CameraMessage::Frame(CameraFrame {
-                    camera_id: motion_frame.camera_id,
-                    sequence: motion_frame.sequence,
-                    timestamp: motion_frame.timestamp,
-                    pose: motion_frame.pose,
-                    contributions,
-                })
-            }
-            (_, other) => {
-                // Pass through: v1 CameraFrame, heartbeats, etc.
-                other
-            }
-        };
-
-        // Forward to processing pipeline.
-        if let Err(e) = msg_tx.try_send(msg_to_forward) {
+        // Forward to processing pipeline as-is.
+        if let Err(e) = msg_tx.try_send(msg) {
             warn!(
                 camera_id = camera_id,
                 "Channel full, dropping message: {}", e
@@ -325,7 +274,7 @@ async fn handle_connection(
         }
     }
 
-    // Mark camera as disconnected. Raymarcher is dropped automatically.
+    // Mark camera as disconnected.
     {
         let mut reg = registry.write();
         reg.disconnect(camera_id);

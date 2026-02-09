@@ -7,7 +7,7 @@ use iluvatar_core::{
 };
 use parking_lot::Mutex;
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 const INTENSITY_THRESHOLD: f32 = 0.01;
 
@@ -216,33 +216,35 @@ impl SparseVoxelGrid {
 
             let idx = Self::pack_index(contrib.index.x, contrib.index.y, contrib.index.z);
 
-            // Check if voxel already exists - always allow updates to existing voxels
+            // Fast path: update existing voxels with a single get_mut lookup.
+            // This is the common case (same voxels hit repeatedly within a frame).
             if let Some(mut entry) = self.voxels.get_mut(&idx) {
                 entry.intensity += contrib.intensity;
                 entry.camera_mask |= camera_bit;
                 entry.last_update = now;
-            } else {
-                // New voxel - check capacity limit
-                if self.voxels.len() >= self.max_voxels {
-                    rejected_count += 1;
-                    continue;
-                }
-
-                // Insert new voxel (race condition: another thread might have inserted,
-                // but that's fine - we'll just update it)
-                self.voxels
-                    .entry(idx)
-                    .and_modify(|v| {
-                        v.intensity += contrib.intensity;
-                        v.camera_mask |= camera_bit;
-                        v.last_update = now;
-                    })
-                    .or_insert(Voxel {
-                        intensity: contrib.intensity,
-                        camera_mask: camera_bit,
-                        last_update: now,
-                    });
+                continue;
             }
+
+            // Slow path: new voxel. Check capacity before inserting.
+            if self.voxels.len() >= self.max_voxels {
+                rejected_count += 1;
+                continue;
+            }
+
+            // Insert new voxel. Another thread may have inserted between our
+            // get_mut and this entry call, so and_modify handles the race.
+            self.voxels
+                .entry(idx)
+                .and_modify(|v| {
+                    v.intensity += contrib.intensity;
+                    v.camera_mask |= camera_bit;
+                    v.last_update = now;
+                })
+                .or_insert(Voxel {
+                    intensity: contrib.intensity,
+                    camera_mask: camera_bit,
+                    last_update: now,
+                });
         }
 
         if invalid_count > 0 {
@@ -253,7 +255,7 @@ impl SparseVoxelGrid {
         }
 
         if rejected_count > 0 {
-            warn!(
+            debug!(
                 "Grid at capacity ({} voxels): rejected {} new voxel contributions from camera {}",
                 self.max_voxels, rejected_count, camera_id
             );

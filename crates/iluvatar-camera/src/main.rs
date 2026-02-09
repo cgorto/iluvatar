@@ -10,6 +10,7 @@ use iluvatar_camera::{
     capture::{CameraCapture, DummyCamera},
     channel::{DropOldestChannel, OutboundFrame},
     config::{CameraConfig, ConfigError},
+    debug::DebugSender,
     difference::FrameProcessor,
     localization::{DummyLocalizer, Localizer},
     network::{NetworkClient, NetworkError, RegistrationResponse},
@@ -160,6 +161,15 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     // so it's ready if the format changes on reconnect.
     let mut raymarcher = create_raymarcher(&config, &reg_response.grid_config);
 
+    // Create debug viewer sender if configured.
+    let mut debug_sender = match config.debug {
+        Some(ref debug_config) => {
+            let (w, h) = config.resolution();
+            Some(DebugSender::new(debug_config, w, h).await)
+        }
+        None => None,
+    };
+
     // Create frame buffer for backpressure.
     let frame_buffer: DropOldestChannel<OutboundFrame> =
         DropOldestChannel::new(config.network.frame_buffer_size);
@@ -174,6 +184,7 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
     info!(
         fps = config.hardware.fps,
         motion_threshold = motion_threshold,
+        motion_downsample = config.processing.motion_downsample,
         buffer_size = config.network.frame_buffer_size,
         heartbeat_interval_secs = heartbeat_interval.as_secs(),
         max_reconnect_attempts = max_reconnect_attempts,
@@ -261,6 +272,12 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
         };
 
         if let Some(mask) = mask {
+            // Stream mask to debug viewer before threshold check, so the
+            // viewer sees all motion, not just frames above threshold.
+            if let Some(ref mut sender) = debug_sender {
+                sender.send_mask(&mask).await;
+            }
+
             let motion_count = mask.motion_count();
             profile_plot!("motion_pixels", motion_count as f64);
 
@@ -269,8 +286,17 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
                 match frame_format {
                     FrameFormat::MotionPixels => {
                         // Server-side raymarching: send raw motion pixels.
-                        let motion_data =
-                            MotionData::from_motion_pixels(mask.motion_pixels());
+                        // Max-pool into a downsampled grid so each factor×factor
+                        // block becomes one pixel with the block's peak intensity.
+                        // Coordinates stay in original resolution so server
+                        // intrinsics work unchanged.
+                        let downsample = config.processing.motion_downsample;
+                        let motion_data = MotionData::from_motion_pixels(
+                            mask.motion_pixels_pooled(
+                                downsample,
+                                &mut processor.pool_buffer,
+                            ),
+                        );
                         profile_plot!(
                             "motion_pixel_count",
                             motion_data.pixel_count() as f64
@@ -294,7 +320,7 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
                         // Camera-side raymarching: compute voxel contributions.
                         let contributions = {
                             profile_scope!("raymarch");
-                            raymarch_from_mask(&raymarcher, &pose, &mask)
+                            raymarch_from_mask(&mut raymarcher, &pose, &mask)
                         };
                         profile_plot!(
                             "contributions",
@@ -319,48 +345,84 @@ async fn run(config_path: &Path) -> Result<(), CameraError> {
             }
         }
 
-        // Try to send buffered frames.
+        // Try to send buffered frames with a 50ms timeout.
+        // If the server can't keep up (e.g. slow raymarching blocking QUIC reads),
+        // we bail out rather than stalling the capture pipeline. Unsent frames
+        // remain in the DropOldestChannel for the next iteration; if the buffer
+        // fills, the oldest frame is dropped — correct backpressure behavior.
+        let send_timeout = Duration::from_millis(50);
         let send_result = {
             profile_scope!("network_send");
-            send_buffered_frames(&mut network, &frame_buffer, &mut metrics).await
-        };
-        if let Err(e) = send_result {
-            warn!("Network error during send: {e}");
-
-            // Attempt reconnection.
-            match handle_reconnect(
-                &mut network,
-                &registration,
-                max_reconnect_attempts,
-                reconnect_timeout,
+            smol::future::or(
+                async {
+                    Some(
+                        send_buffered_frames(&mut network, &frame_buffer, &mut metrics)
+                            .await,
+                    )
+                },
+                async {
+                    smol::Timer::after(send_timeout).await;
+                    None
+                },
             )
             .await
-            {
-                Ok(new_response) => {
-                    metrics.reconnect_count += 1;
-                    // Server might have different grid config after restart.
-                    if new_response.grid_config != reg_response.grid_config {
-                        info!("Grid configuration changed, updating raymarcher");
-                        raymarcher =
-                            create_raymarcher(&config, &new_response.grid_config);
+        };
+        match send_result {
+            Some(Err(e)) => {
+                warn!("Network error during send: {e}");
+
+                // Attempt reconnection.
+                match handle_reconnect(
+                    &mut network,
+                    &registration,
+                    max_reconnect_attempts,
+                    reconnect_timeout,
+                )
+                .await
+                {
+                    Ok(new_response) => {
+                        metrics.reconnect_count += 1;
+                        // Server might have different grid config after restart.
+                        if new_response.grid_config != reg_response.grid_config {
+                            info!(
+                                "Grid configuration changed, updating raymarcher"
+                            );
+                            raymarcher = create_raymarcher(
+                                &config,
+                                &new_response.grid_config,
+                            );
+                        }
+                        if new_response.format != reg_response.format {
+                            info!(
+                                old = ?reg_response.format,
+                                new = ?new_response.format,
+                                "Frame format changed after reconnect"
+                            );
+                        }
+                        frame_format = new_response.format;
+                        reg_response = new_response;
+                        last_heartbeat = Instant::now();
+                        info!("Reconnected and re-registered successfully");
                     }
-                    if new_response.format != reg_response.format {
-                        info!(
-                            old = ?reg_response.format,
-                            new = ?new_response.format,
-                            "Frame format changed after reconnect"
-                        );
+                    Err(e) => {
+                        error!("Failed to reconnect: {e}");
+                        return Err(CameraError::Network(e));
                     }
-                    frame_format = new_response.format;
-                    reg_response = new_response;
-                    last_heartbeat = Instant::now();
-                    info!("Reconnected and re-registered successfully");
-                }
-                Err(e) => {
-                    error!("Failed to reconnect: {e}");
-                    return Err(CameraError::Network(e));
                 }
             }
+            Some(Ok(())) => {
+                // All buffered frames sent successfully.
+            }
+            None => {
+                // Timeout — send took longer than 50ms. Unsent frames remain
+                // in the buffer for the next iteration. This is not an error.
+                debug!("Network send timed out, continuing pipeline");
+            }
+        }
+
+        // Attempt debug viewer reconnect if disconnected.
+        if let Some(ref mut sender) = debug_sender {
+            sender.try_reconnect().await;
         }
 
         // Periodic heartbeat.

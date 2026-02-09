@@ -9,10 +9,10 @@ pub const PROTOCOL_VERSION: u8 = 2;
 
 pub const MAX_CONTRIBUTIONS_PER_FRAME: usize = 65536;
 
-/// Maximum motion pixels per frame. At 1920x1080, this is ~3% of pixels which
-/// represents significant motion. Higher counts indicate either extreme motion
-/// or a threshold tuning issue.
-pub const MAX_MOTION_PIXELS_PER_FRAME: usize = 65536;
+/// Maximum motion pixels per frame. At 1920x1080, ~6% of pixels.
+/// The server's contribution limit controls the raymarching budget, so this
+/// limit only caps wire bandwidth (~650KB per frame at 5 bytes/pixel).
+pub const MAX_MOTION_PIXELS_PER_FRAME: usize = 131072;
 
 // ============================================================================
 // Motion Pixel Types

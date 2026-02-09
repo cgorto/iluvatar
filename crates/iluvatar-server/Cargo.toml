@@ -9,7 +9,12 @@ license.workspace = true
 name = "iluvatar-server"
 path = "src/main.rs"
 
+[features]
+default = []
+profile = ["dep:tracy-client"]
+
 [dependencies]
+tracy-client = { version = "0.18", optional = true, default-features = false, features = ["enable"] }
 iluvatar-core = { workspace = true }
 glam = { workspace = true }
 serde = { workspace = true }

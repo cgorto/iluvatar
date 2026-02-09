@@ -4,7 +4,9 @@ members = [
     "crates/iluvatar-core",
     "crates/iluvatar-camera",
     "crates/iluvatar-server",
-    "crates/iluvatar-simulator", "k230/hello",
+    "crates/iluvatar-simulator",
+    "crates/iluvatar-viewer",
+    "k230/hello",
 ]
 
 [workspace.package]

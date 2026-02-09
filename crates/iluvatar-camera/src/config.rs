@@ -24,6 +24,31 @@ pub struct CameraConfig {
     pub network: NetworkConfig,
     pub processing: ProcessingConfig,
     pub localization: LocalizationConfig,
+    /// Optional debug viewer configuration.
+    /// When present, the camera streams downsampled difference masks over TCP
+    /// to a host-side viewer for real-time visual debugging.
+    #[serde(default)]
+    pub debug: Option<DebugConfig>,
+}
+
+/// Configuration for the debug viewer TCP stream.
+///
+/// The camera connects to the viewer as a TCP client. If the viewer is
+/// unreachable or writes block, frames are silently skipped with zero
+/// impact on the main pipeline.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DebugConfig {
+    /// Address of the debug viewer (host:port), e.g., "192.168.0.185:9100".
+    pub viewer_address: String,
+    /// Downsample factor for the difference mask before sending.
+    /// Factor of 2 means 640x480 becomes 320x240.
+    /// Uses max-pooling to preserve motion signals.
+    #[serde(default = "default_downsample_factor")]
+    pub downsample_factor: u32,
+}
+
+fn default_downsample_factor() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +159,15 @@ pub struct ProcessingConfig {
     pub difference_threshold: u8,
     #[serde(default = "default_motion_threshold_fraction")]
     pub motion_threshold_fraction: f32,
+    /// Stride-based downsample factor for motion pixels before sending.
+    /// Only pixels whose (x, y) coordinates are both divisible by this factor
+    /// are included, reducing pixel count by factor². Coordinates are kept in
+    /// original resolution so server intrinsics remain valid.
+    ///
+    /// A value of 1 disables downsampling (all pixels pass through).
+    /// A value of 4 (default) reduces pixel count by 16x.
+    #[serde(default = "default_motion_downsample")]
+    pub motion_downsample: u32,
     #[serde(default)]
     pub raymarch: RaymarchSettings,
     /// Geographic origin for the voxel grid coordinate system.
@@ -149,6 +183,10 @@ fn default_difference_threshold() -> u8 {
 
 fn default_motion_threshold_fraction() -> f32 {
     0.001 // 0.1% of pixels
+}
+
+fn default_motion_downsample() -> u32 {
+    4
 }
 
 #[derive(Debug, Clone, Deserialize)]
