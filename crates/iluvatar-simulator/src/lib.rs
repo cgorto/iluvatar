@@ -60,12 +60,14 @@
 
 pub(crate) mod camera;
 mod debug_ui;
+mod frame_server;
 pub mod gpu_pipeline;
 pub mod harness;
 mod motion_raymarch;
 mod render_camera;
 pub mod render_layers;
 mod scene;
+pub mod sim_config;
 pub(crate) mod targets;
 mod tracking;
 pub(crate) mod voxels;
@@ -77,6 +79,7 @@ pub use camera::CaptureCamera;
 pub use debug_ui::VisualizationConfig;
 pub use gpu_pipeline::{GpuPipelineMetrics, GpuRay, RayBufferResource};
 pub use render_camera::{RenderCamera, RenderCameraConfig, RenderCameraPlugin};
+pub use sim_config::SimulatorTomlConfig;
 pub use targets::{Target, TargetPath};
 pub use tracking::{TrackingConfig, TrackingMetrics, TrackingState};
 pub use voxels::{SimulatorConfig, SimulatorRaymarcher, VoxelGridResource};
@@ -131,6 +134,8 @@ impl Plugin for RenderSimulatorPlugin {
             .add_plugins(voxels::VoxelsPluginWithoutRaymarch)
             // Tracking still works the same way
             .add_plugins(tracking::TrackingPluginForRenderMode)
+            // TCP frame server for streaming to camera processes
+            .add_plugins(frame_server::FrameServerPlugin)
             .add_plugins(debug_ui::DebugUiPlugin)
             .add_plugins(FreeCameraPlugin);
     }

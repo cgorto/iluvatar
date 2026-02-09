@@ -1,7 +1,7 @@
 //! Simple scene setup - ground plane and basic lighting
 
 use bevy::{camera_controller::free_camera::FreeCamera, prelude::*};
-use bevy_egui::PrimaryEguiContext;
+use bevy_egui::{EguiContext, PrimaryEguiContext};
 
 use crate::render_layers::{debug_camera_layers, light_layers, scene_layers};
 
@@ -9,7 +9,29 @@ pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_scene);
+        app.add_systems(Startup, setup_scene)
+            .add_systems(First, deduplicate_primary_egui_context);
+    }
+}
+
+/// Ensure exactly one entity has `PrimaryEguiContext`.
+///
+/// bevy_egui may add `PrimaryEguiContext` + `EguiContext` to multiple entities
+/// (windows, cameras). We keep it on the first entity that has an `EguiContext`
+/// (typically the window) and strip it from all others.
+///
+/// This MUST be an exclusive system (takes `&mut World`) so the removal is immediate,
+/// not deferred like `Commands`. Deferred removal would still leave duplicates when
+/// `EguiPrimaryContextPass` runs later in the same frame.
+fn deduplicate_primary_egui_context(world: &mut World) {
+    let all_primaries: Vec<Entity> = world
+        .query_filtered::<Entity, (With<PrimaryEguiContext>, With<EguiContext>)>()
+        .iter(world)
+        .collect();
+
+    // Keep only the first one, remove from the rest
+    for entity in all_primaries.iter().skip(1) {
+        world.entity_mut(*entity).remove::<PrimaryEguiContext>();
     }
 }
 
@@ -52,14 +74,11 @@ fn setup_scene(
 
     // Debug/viewer camera - free flying
     // This camera sees ALL layers (scene, targets, AND debug gizmos)
-    // It also hosts the egui UI context and renders last (highest order)
+    // Renders last (highest order) so egui UI is drawn on top of the 3D scene
     commands.spawn((
         Camera3d::default(),
         Camera {
             // Render after all render cameras (which have negative orders like -1, -2, -3, -4)
-            // This ensures:
-            // 1. The 3D scene is rendered correctly
-            // 2. The egui UI is drawn on top of the 3D scene
             order: 100,
             ..default()
         },
@@ -67,10 +86,5 @@ fn setup_scene(
         Transform::from_xyz(0.0, 80.0, 120.0).looking_at(Vec3::ZERO, Vec3::Y),
         // Debug camera sees everything: layers 0, 1, and 2
         debug_camera_layers(),
-        // Explicitly mark this camera as the primary egui context host.
-        // Without this, bevy_egui might attach to a render camera (which
-        // renders to an image target, not the window) causing the UI to
-        // not be visible.
-        PrimaryEguiContext,
     ));
 }

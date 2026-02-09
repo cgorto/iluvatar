@@ -6,6 +6,7 @@ pub mod difference;
 pub mod localization;
 pub mod network;
 pub mod raymarch;
+pub mod tcp_camera;
 
 pub use arena::FrameArena;
 pub use channel::DropOldestChannel;

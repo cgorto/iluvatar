@@ -463,6 +463,9 @@ fn debug_ui_system(
 
             // Show individual track info if we have tracks
             if !tracking_state.tracked_objects.is_empty() {
+                let voxel_size = sim_config.voxel_size;
+                let grid_origin = sim_config.grid_origin;
+
                 ui.add_space(8.0);
                 ui.collapsing("Track Details", |ui| {
                     for obj in &tracking_state.tracked_objects {
@@ -471,13 +474,51 @@ fn debug_ui_system(
                             .map(|v| format!("{:.1} m/s", v.length()))
                             .unwrap_or_else(|| "—".to_string());
 
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Track {}:", obj.id));
+                        // World position (grid-local centroid + grid origin)
+                        let world_pos = obj.centroid + grid_origin;
+
+                        // Voxel indices (centroid in grid-local coords / voxel_size)
+                        let vx = (obj.centroid.x / voxel_size).floor() as i32;
+                        let vy = (obj.centroid.y / voxel_size).floor() as i32;
+                        let vz = (obj.centroid.z / voxel_size).floor() as i32;
+
+                        ui.group(|ui| {
                             ui.label(format!(
-                                "({:.0}, {:.0}, {:.0})",
-                                obj.centroid.x, obj.centroid.y, obj.centroid.z
+                                "Track {} (conf: {:.2}, {} pts, intensity: {:.1})",
+                                obj.id, obj.confidence, obj.point_count, obj.total_intensity
                             ));
-                            ui.label(format!("v={}", vel_str));
+                            ui.horizontal(|ui| {
+                                ui.label("World:");
+                                ui.monospace(format!(
+                                    "({:.1}, {:.1}, {:.1})",
+                                    world_pos.x, world_pos.y, world_pos.z
+                                ));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Voxel:");
+                                ui.monospace(format!("[{}, {}, {}]", vx, vy, vz));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("BBox:");
+                                let bb_min = obj.bounding_box.min + grid_origin;
+                                let bb_max = obj.bounding_box.max + grid_origin;
+                                ui.monospace(format!(
+                                    "({:.0},{:.0},{:.0})-({:.0},{:.0},{:.0})",
+                                    bb_min.x, bb_min.y, bb_min.z,
+                                    bb_max.x, bb_max.y, bb_max.z
+                                ));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Vel:");
+                                if let Some(vel) = obj.velocity {
+                                    ui.monospace(format!(
+                                        "({:.1}, {:.1}, {:.1}) |{}|",
+                                        vel.x, vel.y, vel.z, vel_str
+                                    ));
+                                } else {
+                                    ui.label("—");
+                                }
+                            });
                         });
                     }
                 });

@@ -1,10 +1,17 @@
 use bevy::prelude::*;
-use iluvatar_simulator::{RenderSimulatorPlugin, SimulatorPlugin};
+use iluvatar_simulator::{RenderSimulatorPlugin, SimulatorPlugin, SimulatorTomlConfig};
+use std::path::Path;
 
 fn main() {
-    // Check command-line args to determine which mode to run
+    // Parse command-line args
     let args: Vec<String> = std::env::args().collect();
     let use_render_mode = args.iter().any(|a| a == "--render" || a == "-r");
+
+    // Find --config / -c value
+    let config_path = args
+        .windows(2)
+        .find(|w| w[0] == "--config" || w[0] == "-c")
+        .map(|w| w[1].clone());
 
     let mut app = App::new();
 
@@ -20,6 +27,44 @@ fn main() {
         }),
         ..default()
     }));
+
+    // Load simulator TOML config if provided
+    if let Some(path) = &config_path {
+        match SimulatorTomlConfig::load(Path::new(path)) {
+            Ok(config) => {
+                println!(
+                    "Loaded simulator config from {} ({} cameras)",
+                    path,
+                    config.cameras.len()
+                );
+                app.insert_resource(config);
+            }
+            Err(e) => {
+                eprintln!("Failed to load config from {}: {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Try default path
+        let default_path = "config/simulator.toml";
+        if Path::new(default_path).exists() {
+            match SimulatorTomlConfig::load(Path::new(default_path)) {
+                Ok(config) => {
+                    println!(
+                        "Loaded simulator config from {} ({} cameras)",
+                        default_path,
+                        config.cameras.len()
+                    );
+                    app.insert_resource(config);
+                }
+                Err(e) => {
+                    println!("Warning: failed to load {}: {}. Using defaults.", default_path, e);
+                }
+            }
+        } else {
+            println!("No config file specified, using default camera layout.");
+        }
+    }
 
     if use_render_mode {
         println!("=== Running in RENDER mode ===");

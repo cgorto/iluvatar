@@ -12,6 +12,7 @@ use iluvatar_camera::{
     localization::{DummyLocalizer, Localizer},
     network::{NetworkClient, NetworkError},
     raymarch::Raymarcher,
+    tcp_camera::TcpCamera,
 };
 use iluvatar_core::{BoundingBox, CameraFrame, CameraRegistration, GeoPosition, GridConfigMessage};
 use std::path::Path;
@@ -368,7 +369,24 @@ fn create_camera(config: &CameraConfig) -> Box<dyn CameraCapture> {
     let (width, height) = config.resolution();
     let device = &config.hardware.device;
 
-    if device.starts_with("/dev/video") {
+    // TCP camera: device = "tcp:host:port"
+    if let Some((host, port)) = TcpCamera::parse_device(device) {
+        match TcpCamera::new(host, port, width, height) {
+            Ok(cam) => {
+                info!(
+                    "Initialized TCP camera at {}:{} ({}x{})",
+                    host, port, width, height
+                );
+                return Box::new(cam);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to connect to TCP camera at {}:{}: {}. Falling back to dummy.",
+                    host, port, e
+                );
+            }
+        }
+    } else if device.starts_with("/dev/video") {
         #[cfg(all(target_os = "linux", feature = "real"))]
         {
             match iluvatar_camera::capture::V4L2Camera::new(device, width, height) {
