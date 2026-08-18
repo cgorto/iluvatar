@@ -1,0 +1,30 @@
+[package]
+name = "iluvatar-simulator"
+description = "Bevy-based simulator for Iluvatar testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "iluvatar-simulator"
+path = "src/main.rs"
+
+[dependencies]
+iluvatar-core = { workspace = true }
+iluvatar-server = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Game engine
+bevy = { version = "0.18", features = ["free_camera"] }
+bevy_egui = "0.39"
+
+# GPU buffer handling
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Configuration
+toml = "0.8"
+crossbeam-channel = "0.5.15"

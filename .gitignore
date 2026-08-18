@@ -1,0 +1,34 @@
+/target/
+
+# Local runtime configuration and credentials.
+/config/*.toml
+!/config/*.example.toml
+*.key
+*.pem
+*.crt
+.env
+.env.*
+
+# K230 toolchains, SDK libraries, firmware, and build products.
+/embedded/k230/sdk/
+/embedded/k230/toolchain/
+/embedded/k230/**/build/
+/embedded/k230/camera/rtsmart-camera
+/embedded/k230/reader/reader
+/embedded/k230/reader/*.o
+*.a
+*.elf
+*.img
+*.img.gz
+
+# Editor, profiler, and frontend output.
+.idea/
+.vscode/
+.claude/
+*.tracy
+node_modules/
+dist/
+.vite/
+__pycache__/
+*.py[cod]
+imgui.ini

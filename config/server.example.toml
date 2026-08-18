@@ -1,0 +1,33 @@
+# Example configuration matching the K230 registration in embedded/k230/camera.
+
+[server]
+listen_address = "0.0.0.0:4433"       # Optional QUIC camera transport.
+tcp_listen_address = "0.0.0.0:4434"   # K230 Linux forwarder.
+websocket_port = 18080
+broadcast_rate_hz = 10.0
+
+[grid]
+coordinate_mode = "Gps"
+origin = { latitude = 47.6062, longitude = -122.3321, altitude = 0.0 }
+dimensions = [1000, 1000, 100]
+voxel_size = 1.0
+max_voxels = 200000
+
+[decay]
+rate = 3.0
+update_interval = 0.1
+
+[detection]
+intensity_threshold = 10.0
+min_contributors = 2
+cluster_epsilon = 5.0
+cluster_min_points = 3
+
+[raymarch]
+max_distance = 500.0
+attenuation = "none"
+contribution_limit = 16384
+
+[tracking]
+association_threshold = 10.0
+max_missing_frames = 30

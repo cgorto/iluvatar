@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install simulator system dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libasound2-dev libudev-dev
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+
+  embedded-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check scripts and Linux forwarder
+        run: |
+          bash -n embedded/k230/camera/build.sh embedded/k230/reader/build_reader.sh
+          python3 -m py_compile embedded/k230/tools/build_firmware.py
+          gcc -O2 -Wall -Wextra -Werror \
+            -Iembedded/k230/reader/vendor \
+            -c embedded/k230/reader/reader.c \
+            -o /tmp/iluvatar-reader.o

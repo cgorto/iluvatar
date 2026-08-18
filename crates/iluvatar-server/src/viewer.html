@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ILUVATAR</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; }
+  canvas { display: block; }
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0;
+    padding: 16px 20px;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    color: #888;
+    pointer-events: none;
+    user-select: none;
+  }
+  #hud .status {
+    font-size: 15px;
+    font-weight: bold;
+    letter-spacing: 2px;
+  }
+  #hud .status.connected { color: #00ff88; text-shadow: 0 0 8px #00ff8844; }
+  #hud .status.disconnected { color: #ff4444; text-shadow: 0 0 8px #ff444444; }
+  #hud .stats { margin-top: 6px; color: #666; }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="status disconnected" id="status">CONNECTING</div>
+  <div class="stats" id="stats"></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// =========================================================================
+// Scene setup
+// =========================================================================
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0a);
+
+const camera = new THREE.PerspectiveCamera(
+  50,
+  window.innerWidth / window.innerHeight,
+  0.01,
+  100,
+);
+// Position camera above and to the side of the table.
+camera.position.set(2.5, 2.0, 3.5);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0.6, 0.3, 1.2);
+controls.enableDamping = true;
+controls.dampingFactor = 0.1;
+controls.update();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// =========================================================================
+// Grid and reference geometry
+// =========================================================================
+
+// Ground plane grid (XY plane, since Y is forward in our local coord system).
+// We draw it in Three.js XZ (Three.js Y-up) and map: local X -> Three X,
+// local Z -> Three Y, local Y -> Three Z.
+const gridGroup = new THREE.Group();
+
+// Table outline: 1.22m x 2.44m (4' x 8').
+const tableGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(0, 0, 0),
+  new THREE.Vector3(1.22, 0, 0),
+  new THREE.Vector3(1.22, 0, 2.44),
+  new THREE.Vector3(0, 0, 2.44),
+  new THREE.Vector3(0, 0, 0),
+]);
+const tableLine = new THREE.Line(
+  tableGeo,
+  new THREE.LineBasicMaterial({ color: 0x335533 }),
+);
+gridGroup.add(tableLine);
+
+// Fine grid lines every 0.25m.
+const gridMat = new THREE.LineBasicMaterial({ color: 0x1a1a1a });
+for (let x = 0; x <= 1.25; x += 0.25) {
+  const g = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(x, 0, 0),
+    new THREE.Vector3(x, 0, 2.44),
+  ]);
+  gridGroup.add(new THREE.Line(g, gridMat));
+}
+for (let y = 0; y <= 2.5; y += 0.25) {
+  const g = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, y),
+    new THREE.Vector3(1.22, 0, y),
+  ]);
+  gridGroup.add(new THREE.Line(g, gridMat));
+}
+
+scene.add(gridGroup);
+
+// Origin axes: R=X, G=Z(up), B=Y(forward). Length 0.3m.
+const axesLen = 0.3;
+const axesMat = (c) => new THREE.LineBasicMaterial({ color: c });
+function addAxis(dir, color) {
+  const g = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    dir.clone().multiplyScalar(axesLen),
+  ]);
+  scene.add(new THREE.Line(g, axesMat(color)));
+}
+addAxis(new THREE.Vector3(1, 0, 0), 0xff4444); // X right (red)
+addAxis(new THREE.Vector3(0, 1, 0), 0x44ff44); // Z up (green)
+addAxis(new THREE.Vector3(0, 0, 1), 0x4444ff); // Y forward (blue)
+
+// Axis labels as sprites.
+function makeAxisLabel(text, color, position) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.font = 'bold 48px Courier New';
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 32, 32);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false })
+  );
+  sprite.scale.set(0.15, 0.15, 1);
+  sprite.position.copy(position);
+  scene.add(sprite);
+}
+makeAxisLabel('X', '#ff4444', new THREE.Vector3(axesLen + 0.05, 0, 0));
+makeAxisLabel('Z', '#44ff44', new THREE.Vector3(0, axesLen + 0.05, 0));
+makeAxisLabel('Y', '#4444ff', new THREE.Vector3(0, 0, axesLen + 0.05));
+
+// =========================================================================
+// Lighting
+// =========================================================================
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+dirLight.position.set(2, 4, 3);
+scene.add(dirLight);
+
+// =========================================================================
+// Tracked object rendering (with decay)
+// =========================================================================
+
+// Track objects by ID with a "last seen" timestamp so they fade out
+// smoothly instead of vanishing between frames.
+const OBJECT_DECAY_SECS = 3.0; // Seconds before a stale object fully fades.
+const trackedMeshes = new Map(); // id -> { mesh, lastSeen, lastPos }
+const objectGeometry = new THREE.OctahedronGeometry(0.04, 1);
+
+function getOrCreateTrackedMesh(id) {
+  let entry = trackedMeshes.get(id);
+  if (entry) return entry;
+
+  const mat = new THREE.MeshPhongMaterial({
+    color: 0x00ff88,
+    emissive: 0x004422,
+    transparent: true,
+    opacity: 1.0,
+  });
+  const mesh = new THREE.Mesh(objectGeometry, mat);
+  scene.add(mesh);
+  entry = { mesh, lastSeen: performance.now() / 1000, lastPos: null };
+  trackedMeshes.set(id, entry);
+  return entry;
+}
+
+// Convert iluvatar local coordinates to Three.js coordinates.
+// Iluvatar local: X=right, Y=forward, Z=up.
+// Three.js:       X=right, Y=up,      Z=forward (toward camera).
+function toThree(x, y, z) {
+  return new THREE.Vector3(x, z, y);
+}
+
+let currentObjects = [];
+
+function updateObjects(objects) {
+  currentObjects = objects;
+  const now = performance.now() / 1000;
+
+  for (const obj of objects) {
+    let x, y, z;
+    if (Array.isArray(obj.centroid)) {
+      [x, y, z] = obj.centroid;
+    } else if (obj.centroid) {
+      x = obj.centroid.x;
+      y = obj.centroid.y;
+      z = obj.centroid.z;
+    } else {
+      continue;
+    }
+
+    const entry = getOrCreateTrackedMesh(obj.id);
+    const pos = toThree(x, y, z);
+    entry.mesh.position.copy(pos);
+    entry.lastSeen = now;
+    entry.lastPos = pos;
+
+    // Full opacity and bright color for fresh detections.
+    entry.mesh.material.opacity = 1.0;
+    entry.mesh.material.emissive.setHex(0x004422);
+    entry.mesh.visible = true;
+
+    const scale = 0.5 + Math.min(obj.total_intensity || 0, 100) / 100;
+    entry.mesh.scale.setScalar(scale);
+  }
+}
+
+// Called each animation frame to decay stale objects.
+function decayObjects() {
+  const now = performance.now() / 1000;
+  const toRemove = [];
+
+  for (const [id, entry] of trackedMeshes) {
+    const age = now - entry.lastSeen;
+    if (age > OBJECT_DECAY_SECS) {
+      // Fully decayed — remove.
+      scene.remove(entry.mesh);
+      entry.mesh.geometry.dispose();
+      entry.mesh.material.dispose();
+      toRemove.push(id);
+    } else if (age > 0.1) {
+      // Fading out.
+      const t = age / OBJECT_DECAY_SECS;
+      entry.mesh.material.opacity = 1.0 - t;
+      entry.mesh.material.emissive.setHex(0x442200);
+    }
+  }
+
+  for (const id of toRemove) {
+    trackedMeshes.delete(id);
+  }
+}
+
+// =========================================================================
+// Voxel point cloud (with decay)
+// =========================================================================
+
+// Voxels accumulate in a local buffer keyed by quantized position.
+// New data refreshes intensity and timestamp; stale voxels fade out
+// over VOXEL_DECAY_SECS before being removed. This creates a persistent
+// trail that shows ray patterns building up over time.
+const VOXEL_DECAY_SECS = 5.0;
+const MAX_VOXEL_POINTS = 10000;
+
+// Map from quantized position key -> { x, y, z, intensity, lastSeen }
+const voxelBuffer = new Map();
+
+// Quantize to 1cm grid to merge nearby points.
+function voxelKey(x, y, z) {
+  const qx = Math.round(x * 100);
+  const qy = Math.round(y * 100);
+  const qz = Math.round(z * 100);
+  return qx + ',' + qy + ',' + qz;
+}
+
+const voxelPositions = new Float32Array(MAX_VOXEL_POINTS * 3);
+const voxelColors = new Float32Array(MAX_VOXEL_POINTS * 3);
+const voxelAlphas = new Float32Array(MAX_VOXEL_POINTS);
+
+const voxelGeometry = new THREE.BufferGeometry();
+voxelGeometry.setAttribute('position', new THREE.BufferAttribute(voxelPositions, 3));
+voxelGeometry.setAttribute('color', new THREE.BufferAttribute(voxelColors, 3));
+voxelGeometry.setDrawRange(0, 0);
+
+const voxelMaterial = new THREE.PointsMaterial({
+  size: 0.012,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.8,
+  sizeAttenuation: true,
+  depthWrite: false,
+});
+const voxelPoints = new THREE.Points(voxelGeometry, voxelMaterial);
+scene.add(voxelPoints);
+
+// Color ramp: low intensity = blue, high = red.
+function intensityColor(t) {
+  // Blue -> Cyan -> Green -> Yellow -> Red
+  if (t < 0.25) {
+    return [0, t * 4, 1];
+  } else if (t < 0.5) {
+    return [0, 1, 1 - (t - 0.25) * 4];
+  } else if (t < 0.75) {
+    return [(t - 0.5) * 4, 1, 0];
+  } else {
+    return [1, 1 - (t - 0.75) * 4, 0];
+  }
+}
+
+function updateVoxels(voxels) {
+  if (!voxels) return;
+
+  const now = performance.now() / 1000;
+
+  // Merge incoming voxels into the buffer.
+  for (const v of voxels) {
+    const [x, y, z, intensity] = v;
+    const key = voxelKey(x, y, z);
+    const existing = voxelBuffer.get(key);
+    if (existing) {
+      // Refresh: take max intensity and reset timestamp.
+      existing.intensity = Math.max(existing.intensity, intensity);
+      existing.lastSeen = now;
+    } else {
+      voxelBuffer.set(key, { x, y, z, intensity, lastSeen: now });
+    }
+  }
+}
+
+// Called each animation frame to rebuild the point cloud with decay.
+function decayVoxels() {
+  const now = performance.now() / 1000;
+  const toRemove = [];
+
+  // Find max intensity for color normalization.
+  let maxIntensity = 0;
+  for (const entry of voxelBuffer.values()) {
+    if (entry.intensity > maxIntensity) maxIntensity = entry.intensity;
+  }
+
+  let i = 0;
+  for (const [key, entry] of voxelBuffer) {
+    if (i >= MAX_VOXEL_POINTS) break;
+
+    const age = now - entry.lastSeen;
+    if (age > VOXEL_DECAY_SECS) {
+      toRemove.push(key);
+      continue;
+    }
+
+    const pos = toThree(entry.x, entry.y, entry.z);
+    voxelPositions[i * 3]     = pos.x;
+    voxelPositions[i * 3 + 1] = pos.y;
+    voxelPositions[i * 3 + 2] = pos.z;
+
+    // Fade: fresh = full color, old = dim.
+    const fade = 1.0 - (age / VOXEL_DECAY_SECS);
+    const t = Math.min(entry.intensity / Math.max(maxIntensity, 1), 1.0);
+    const [r, g, b] = intensityColor(t);
+    voxelColors[i * 3]     = r * fade;
+    voxelColors[i * 3 + 1] = g * fade;
+    voxelColors[i * 3 + 2] = b * fade;
+
+    i++;
+  }
+
+  for (const key of toRemove) {
+    voxelBuffer.delete(key);
+  }
+
+  voxelGeometry.attributes.position.needsUpdate = true;
+  voxelGeometry.attributes.color.needsUpdate = true;
+  voxelGeometry.setDrawRange(0, i);
+}
+
+// =========================================================================
+// Camera rendering
+// =========================================================================
+
+// Camera markers: small pyramids with floating labels.
+const cameraGroup = new THREE.Group();
+scene.add(cameraGroup);
+
+const cameraMarkers = new Map(); // camera_id -> { mesh, label }
+
+// Create a CSS2D-style label as a sprite.
+function makeLabel(text) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.font = 'bold 28px Courier New';
+  ctx.fillStyle = '#ffcc00';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, 128, 40);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(0.4, 0.1, 1);
+  return sprite;
+}
+
+// Camera frustum wireframe — a small pyramid pointing along -Z (camera forward).
+function makeCameraMarker() {
+  // Build a simple frustum shape: 4 lines from the camera origin to a
+  // rectangle representing the image plane, plus the rectangle edges.
+  const d = 0.15; // Frustum depth (length of the viewing direction indicator).
+  const hw = 0.06; // Half-width of the image plane rectangle.
+  const hh = 0.04; // Half-height of the image plane rectangle.
+
+  // Corners of the far plane in local camera space (looking down -Z).
+  const tl = new THREE.Vector3(-hw, hh, -d);
+  const tr = new THREE.Vector3( hw, hh, -d);
+  const br = new THREE.Vector3( hw, -hh, -d);
+  const bl = new THREE.Vector3(-hw, -hh, -d);
+  const o  = new THREE.Vector3(0, 0, 0);
+
+  const points = [
+    o, tl, o, tr, o, br, o, bl, // Edges from origin to corners.
+    tl, tr, tr, br, br, bl, bl, tl, // Rectangle edges.
+  ];
+  const geo = new THREE.BufferGeometry().setFromPoints(points);
+  const mat = new THREE.LineBasicMaterial({ color: 0xffcc00 });
+  return new THREE.LineSegments(geo, mat);
+}
+
+function updateCameras(cameras) {
+  if (!cameras) return;
+
+  const seen = new Set();
+
+  for (const cam of cameras) {
+    seen.add(cam.camera_id);
+    const [x, y, z] = cam.position;
+    const pos = toThree(x, y, z);
+
+    let marker = cameraMarkers.get(cam.camera_id);
+    if (!marker) {
+      // Create new marker.
+      const mesh = makeCameraMarker();
+      const label = makeLabel(cam.name || ('cam-' + cam.camera_id));
+      cameraGroup.add(mesh);
+      cameraGroup.add(label);
+      marker = { mesh, label };
+      cameraMarkers.set(cam.camera_id, marker);
+    }
+
+    marker.mesh.position.copy(pos);
+    marker.label.position.copy(pos);
+    marker.label.position.y += 0.10; // Float label above marker.
+
+    // Apply orientation if available.
+    // Orientation is [yaw, pitch, roll] in degrees in iluvatar convention:
+    //   Yaw: rotation around Z-up axis (0 = +Y forward, 90 = +X right)
+    //   Pitch: tilt (negative = looking down)
+    //   Roll: around forward axis
+    // The frustum is built looking down -Z in local space (Three.js camera convention).
+    // We need to rotate it to match the iluvatar orientation mapped to Three.js coords.
+    if (cam.orientation) {
+      const [yawDeg, pitchDeg, rollDeg] = cam.orientation;
+      const yaw = yawDeg * Math.PI / 180;
+      const pitch = pitchDeg * Math.PI / 180;
+      const roll = rollDeg * Math.PI / 180;
+
+      // In Three.js (Y-up): iluvatar yaw rotates around Three.js Y axis,
+      // iluvatar pitch rotates around Three.js X axis.
+      // Iluvatar yaw 0 = +Y(forward) which is +Z in Three.js.
+      // The frustum points along -Z in local space (Three.js camera convention).
+      // A yaw of 0 should point the frustum along +Z (Three.js) = +Y (iluvatar forward).
+      // So we need to rotate 180° around Y first (flip -Z to +Z), then apply yaw/pitch.
+      const q = new THREE.Quaternion();
+      const flip = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0), Math.PI
+      );
+      const qYaw = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0), -yaw
+      );
+      const qPitch = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(1, 0, 0), -pitch
+      );
+      const qRoll = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, 1), roll
+      );
+      q.copy(qYaw).multiply(qPitch).multiply(qRoll).multiply(flip);
+      marker.mesh.quaternion.copy(q);
+    }
+
+    // Dim disconnected cameras.
+    const color = cam.connected ? 0xffcc00 : 0x555500;
+    marker.mesh.material.color.setHex(color);
+  }
+
+  // Remove cameras that disappeared.
+  for (const [id, marker] of cameraMarkers) {
+    if (!seen.has(id)) {
+      cameraGroup.remove(marker.mesh);
+      cameraGroup.remove(marker.label);
+      cameraMarkers.delete(id);
+    }
+  }
+}
+
+// =========================================================================
+// WebSocket connection
+// =========================================================================
+
+const statusEl = document.getElementById('status');
+const statsEl = document.getElementById('stats');
+let messageCount = 0;
+
+function connect() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = protocol + '//' + location.host;
+  const ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    statusEl.textContent = 'CONNECTED';
+    statusEl.className = 'status connected';
+  };
+
+  ws.onmessage = (event) => {
+    messageCount++;
+    try {
+      const data = JSON.parse(event.data);
+      const update = data.Update || data.Snapshot || data;
+      if (update.objects) {
+        updateObjects(update.objects);
+      }
+      if (data.cameras) {
+        updateCameras(data.cameras);
+      }
+      if (data.voxels) {
+        updateVoxels(data.voxels);
+      }
+    } catch (e) {
+      console.error('[WS] Parse error:', e);
+    }
+  };
+
+  ws.onerror = () => {
+    statusEl.textContent = 'ERROR';
+    statusEl.className = 'status disconnected';
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = 'DISCONNECTED';
+    statusEl.className = 'status disconnected';
+    // Reconnect after 2 seconds.
+    setTimeout(connect, 2000);
+  };
+}
+
+connect();
+
+// =========================================================================
+// Animation loop
+// =========================================================================
+
+let frameCount = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  frameCount++;
+
+  // Decay stale objects and voxels, spin active objects.
+  decayObjects();
+  decayVoxels();
+  for (const [, entry] of trackedMeshes) {
+    entry.mesh.rotation.y += 0.02;
+    entry.mesh.rotation.x += 0.01;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+
+  // Update HUD every 30 frames.
+  if (frameCount % 30 === 0) {
+    const objCount = trackedMeshes.size;
+    const camCount = cameraMarkers.size;
+    const connCount = [...cameraMarkers.values()].filter(m =>
+      m.mesh.material.color.getHex() === 0xffcc00).length;
+    const voxCount = voxelBuffer.size;
+    statsEl.textContent =
+      objCount + ' object' + (objCount !== 1 ? 's' : '') +
+      '  |  ' + voxCount + ' voxel' + (voxCount !== 1 ? 's' : '') +
+      '  |  ' + camCount + ' cam' + (camCount !== 1 ? 's' : '') +
+      ' (' + connCount + ' live)' +
+      '  |  ' + messageCount + ' msgs';
+  }
+}
+
+animate();
+</script>
+</body>
+</html>

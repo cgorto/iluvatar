@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/iluvatar-core",
+    "crates/iluvatar-server",
+    "crates/iluvatar-simulator",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/cgorto/iluvatar"
+
+[workspace.dependencies]
+glam = { version = "0.30.7", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.0", features = ["alloc"] }
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+smol = "2.0"
+async-channel = "2.3"
+futures-lite = "2.5"
+async-compat = "0.2"
+
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+
+iluvatar-core = { path = "crates/iluvatar-core" }
+iluvatar-server = { path = "crates/iluvatar-server" }
+iluvatar-simulator = { path = "crates/iluvatar-simulator" }
