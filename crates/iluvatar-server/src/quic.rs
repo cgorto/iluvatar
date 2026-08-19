@@ -1,8 +1,7 @@
 use async_channel::Sender;
 use async_compat::Compat;
 use iluvatar_core::{
-    CameraMessage, CameraRegistration, FrameFormat, GridConfigMessage, ServerMessage,
-    ServerPreferences,
+    CameraMessage, FrameFormat, GridConfigMessage, ServerMessage, ServerPreferences,
     protocol::{self, FrameError},
 };
 use parking_lot::RwLock;
@@ -13,7 +12,10 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use crate::camera_mgmt::CameraRegistry;
+use crate::{
+    camera_mgmt::CameraRegistry,
+    validation::{self, ValidationError},
+};
 
 #[derive(Debug, Error)]
 pub enum QuicError {
@@ -121,6 +123,8 @@ async fn handle_connection(
         }
     };
 
+    validation::validate_registration(&registration, grid_config.coordinate_mode)?;
+
     let camera_id = registration.camera_id;
     let supports_motion = registration.capabilities.motion_frames;
     info!(
@@ -131,21 +135,15 @@ async fn handle_connection(
     );
 
     // Add to registry.
-    {
-        let mut reg = registry.write();
-        reg.register(CameraRegistration {
-            version: registration.version,
-            camera_id: registration.camera_id,
-            intrinsics: registration.intrinsics,
-            initial_pose: registration.initial_pose,
-            capabilities: registration.capabilities.clone(),
-        });
-    }
+    let session_id = registry
+        .write()
+        .register(registration.clone())
+        .ok_or_else(|| ConnectionHandlerError::Protocol("Registration was rejected".into()))?;
 
     // Send response based on camera capabilities.
     if supports_motion {
-        // v2 camera: tell it to send MotionPixels. Raymarching happens in the
-        // main processing loop, not here — keeping this handler fast so QUIC
+        // Tell a motion-capable v2 camera to send MotionPixels. Raymarching
+        // happens in the main processing loop, not here — keeping this handler fast so QUIC
         // flow control windows stay open.
         let prefs_response = ServerMessage::RegisteredWithPrefs {
             camera_id,
@@ -178,7 +176,7 @@ async fn handle_connection(
             "Sent RegisteredWithPrefs + GridConfig (MotionPixels mode)"
         );
     } else {
-        // v1 camera: send GridConfig only (existing behavior).
+        // Contribution-only v2 camera: send GridConfig without motion preferences.
         let response = ServerMessage::GridConfig(grid_config.clone());
         let response_data =
             protocol::serialize(&response).map_err(ConnectionHandlerError::Serialize)?;
@@ -198,13 +196,7 @@ async fn handle_connection(
     // Forward the registration message to the main loop, which creates a
     // per-camera raymarcher if needed.
     let _ = msg_tx
-        .send(CameraMessage::Register(CameraRegistration {
-            version: registration.version,
-            camera_id: registration.camera_id,
-            intrinsics: registration.intrinsics,
-            initial_pose: registration.initial_pose,
-            capabilities: registration.capabilities.clone(),
-        }))
+        .send(CameraMessage::Register(registration.clone()))
         .await;
 
     // Main receive loop: accept unidirectional streams for frame data.
@@ -253,7 +245,11 @@ async fn handle_connection(
             }
         };
 
-        // Forward to processing pipeline as-is.
+        if let Err(error) = validation::validate_message(&msg, &registration, &grid_config) {
+            warn!(camera_id, %error, "Rejecting invalid camera message");
+            break;
+        }
+
         if let Err(e) = msg_tx.try_send(msg) {
             warn!(
                 camera_id = camera_id,
@@ -265,7 +261,7 @@ async fn handle_connection(
     // Mark camera as disconnected.
     {
         let mut reg = registry.write();
-        reg.disconnect(camera_id);
+        reg.disconnect(camera_id, session_id);
     }
 
     Ok(())
@@ -281,6 +277,8 @@ enum ConnectionHandlerError {
     Frame(#[from] FrameError),
     #[error("Deserialize error: {0}")]
     Deserialize(postcard::Error),
+    #[error("Validation error: {0}")]
+    Validation(#[from] ValidationError),
     #[error("Serialize error: {0}")]
     Serialize(postcard::Error),
     #[error("Protocol error: {0}")]

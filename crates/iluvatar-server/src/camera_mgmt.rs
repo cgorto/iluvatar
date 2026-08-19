@@ -11,6 +11,7 @@ pub enum ConnectionState {
 
 pub struct CameraState {
     pub id: CameraId,
+    session_id: u64,
     pub intrinsics: CameraIntrinsics,
     pub last_pose: CameraPose,
     pub connection: ConnectionState,
@@ -22,9 +23,10 @@ pub struct CameraState {
 }
 
 impl CameraState {
-    fn new(registration: CameraRegistration) -> Self {
+    fn new(registration: CameraRegistration, session_id: u64) -> Self {
         Self {
             id: registration.camera_id,
+            session_id,
             intrinsics: registration.intrinsics,
             last_pose: registration.initial_pose,
             connection: ConnectionState::Connected {
@@ -66,27 +68,32 @@ impl CameraState {
 /// Registry of all cameras
 pub struct CameraRegistry {
     cameras: HashMap<CameraId, CameraState>,
+    next_session_id: u64,
 }
 
 impl CameraRegistry {
     pub fn new() -> Self {
         Self {
             cameras: HashMap::new(),
+            next_session_id: 1,
         }
     }
 
-    /// Register a camera. Allows re-registration after reconnect by updating
-    /// the existing entry (insert-or-update semantics).
-    pub fn register(&mut self, registration: CameraRegistration) -> bool {
-        // Verify protocol version.
+    /// Register a camera and return the generation assigned to this connection.
+    /// A reconnect replaces the current generation; an older handler may then
+    /// finish without disconnecting the replacement.
+    pub fn register(&mut self, registration: CameraRegistration) -> Option<u64> {
         if registration.version != iluvatar_core::PROTOCOL_VERSION {
-            return false;
+            return None;
         }
 
-        // Insert or update — allows re-registration after reconnect.
-        self.cameras
-            .insert(registration.camera_id, CameraState::new(registration));
-        true
+        let session_id = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
+        self.cameras.insert(
+            registration.camera_id,
+            CameraState::new(registration, session_id),
+        );
+        Some(session_id)
     }
 
     /// Mark camera as connected
@@ -98,9 +105,11 @@ impl CameraRegistry {
         }
     }
 
-    /// Mark camera as disconnected
-    pub fn disconnect(&mut self, camera_id: CameraId) {
-        if let Some(state) = self.cameras.get_mut(&camera_id) {
+    /// Mark a camera disconnected only if this is still its active connection.
+    pub fn disconnect(&mut self, camera_id: CameraId, session_id: u64) {
+        if let Some(state) = self.cameras.get_mut(&camera_id)
+            && state.session_id == session_id
+        {
             state.connection = ConnectionState::Disconnected {
                 since: Instant::now(),
             };
@@ -178,5 +187,53 @@ impl CameraRegistry {
 impl Default for CameraRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::{Quat, UVec2, Vec2};
+    use iluvatar_core::{
+        CameraCapabilities, DistortionModel, Fov, GeoPosition, LocalizationStatus,
+        PROTOCOL_VERSION, PoseUncertainty,
+    };
+
+    fn registration() -> CameraRegistration {
+        CameraRegistration {
+            version: PROTOCOL_VERSION,
+            camera_id: 1,
+            intrinsics: CameraIntrinsics {
+                focal_length: Vec2::splat(600.0),
+                principal_point: Vec2::new(640.0, 360.0),
+                resolution: UVec2::new(1280, 720),
+                fov: Fov {
+                    horizontal: 1.2,
+                    vertical: 0.7,
+                },
+                distortion: DistortionModel::None,
+            },
+            initial_pose: CameraPose {
+                position: GeoPosition::new(47.6, -122.3, 10.0),
+                orientation: Quat::IDENTITY,
+                timestamp: 0,
+                uncertainty: PoseUncertainty::default(),
+                status: LocalizationStatus::Nominal,
+            },
+            capabilities: CameraCapabilities::with_motion_frames(),
+        }
+    }
+
+    #[test]
+    fn stale_connection_cannot_disconnect_replacement() {
+        let mut registry = CameraRegistry::new();
+        let old_session = registry.register(registration()).unwrap();
+        let new_session = registry.register(registration()).unwrap();
+
+        registry.disconnect(1, old_session);
+        assert!(registry.is_connected(1));
+
+        registry.disconnect(1, new_session);
+        assert!(!registry.is_connected(1));
     }
 }

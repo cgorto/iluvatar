@@ -145,13 +145,13 @@ fn test_tcp_registration_motion_camera() {
 }
 
 #[test]
-fn test_tcp_registration_legacy_camera() {
+fn test_tcp_registration_contribution_camera() {
     smol::block_on(async {
         let (addr, _msg_rx) = spawn_server().await;
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
 
-        // v1 camera: motion_frames = false.
+        // Version-2 camera selecting contribution delivery.
         let mut reg = test_registration(7);
         reg.capabilities.motion_frames = false;
         let reg_bytes = protocol::serialize(&CameraMessage::Register(reg)).unwrap();

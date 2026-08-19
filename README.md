@@ -27,7 +27,7 @@ unfinished product work out of the public surface.
 On a CanMV-K230 with an OV5647 sensor:
 
 - Native 720p VICAP capture reached **59–60 FPS** without automatic exposure.
-- The complete camera loop—1080p sensor mode downscaled by the ISP to 1280×720,
+- The complete camera loop—1080p sensor mode with a 1280×720 VICAP channel,
   AE/AWB, motion processing, serialization, and DATAFIFO—ran at **30 FPS**.
 - The Linux forwarder sustained the 30 FPS stream with no reported drops.
 - A release Rust server sustained the complete real 30 FPS stream while

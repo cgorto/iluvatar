@@ -5,8 +5,8 @@ use crate::{
 };
 
 /// Current protocol version. Increment when making breaking changes.
-/// v1: Initial protocol with camera-side raymarching
-/// v2: Added MotionFrame for server-side raymarching
+/// Only version 2 is accepted by the curated server; v1 discriminants remain in
+/// the schema so recorded data and the evolution of the protocol stay legible.
 pub const PROTOCOL_VERSION: u8 = 2;
 
 pub const MAX_CONTRIBUTIONS_PER_FRAME: usize = 65536;
@@ -293,7 +293,7 @@ pub struct MotionFrame {
 /// Rather than bumping the protocol version for every new feature, we use
 /// capability flags. The server can:
 /// 1. Check if a camera supports a feature before requesting it
-/// 2. Fall back to legacy behavior for older cameras
+/// 2. Select contribution delivery for simpler version-2 cameras
 /// 3. Enable features incrementally during rollout
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CameraCapabilities {
@@ -402,9 +402,8 @@ pub struct CameraFrame {
 ///
 /// # Protocol Evolution
 ///
-/// The `capabilities` field was added in protocol v2. When deserializing
-/// messages from v1 cameras, it will default to `CameraCapabilities::default()`
-/// (basic capabilities only). This maintains backward compatibility.
+/// The `capabilities` field was added in protocol v2. A v2 camera may select
+/// either contribution or motion-pixel delivery; protocol v1 is not accepted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraRegistration {
     /// Protocol version the camera implements
@@ -413,8 +412,7 @@ pub struct CameraRegistration {
     pub intrinsics: CameraIntrinsics,
     pub initial_pose: CameraPose,
 
-    /// Capabilities this camera supports. Added in v2.
-    /// Defaults to basic capabilities for backward compatibility with v1 cameras.
+    /// Capabilities this v2 camera supports. The default selects contribution mode.
     #[serde(default)]
     pub capabilities: CameraCapabilities,
 }
@@ -436,7 +434,7 @@ pub enum CameraMessage {
     /// Initial registration (must be first message)
     Register(CameraRegistration),
 
-    /// Frame with pre-computed voxel contributions (v1 format)
+    /// Frame with pre-computed voxel contributions (original delivery format)
     Frame(CameraFrame),
 
     /// Keepalive signal
@@ -459,7 +457,7 @@ pub enum CameraMessage {
 /// Same ordering constraints as `CameraMessage` - new variants at the end only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
-    /// Registration acknowledgment (v1)
+    /// Historical registration acknowledgment; retained for discriminant stability
     Registered { camera_id: CameraId },
 
     /// Grid configuration for raymarching
@@ -486,7 +484,7 @@ pub struct GridConfigMessage {
     pub dimensions: [u32; 3],
     pub voxel_size: f32,
     /// Coordinate mode for position interpretation.
-    /// Defaults to Gps for backward compatibility with v1/v2 cameras.
+    /// Defaults to GPS when reading version-2 messages that predate local mode.
     #[serde(default)]
     pub coordinate_mode: CoordinateMode,
 }
@@ -551,7 +549,10 @@ pub fn deserialize<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, postcard
 }
 
 // Framing utilities for QUIC streams
-pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10MB
+/// Hard wire-frame limit. The K230's largest DATAFIFO payload is 256 KiB;
+/// 1 MiB leaves room for other negotiated formats without allowing one peer
+/// to force a multi-megabyte allocation before semantic validation.
+pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum FrameError {

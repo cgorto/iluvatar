@@ -99,7 +99,7 @@ main :: proc() {
 	printf("Provide DATAFIFO_PHYS_ADDR and REGISTRATION_HEX to the Linux reader.\n")
 
 	// Step 2: Open VICAP and warm up the ISP. Use the firmware's proven
-	// 1080p sensor mode and let the ISP downscale to 720p. The native
+	// 1080p sensor mode with a measured 1280x720 VICAP channel. The native
 	// 720p mode reaches 60 fps but produces unstable luma on this image.
 	if !capture_open(&g_device, sensor_type = OV5647_CSI0_1080P_30FPS) {
 		printf("Failed to open VICAP\n")

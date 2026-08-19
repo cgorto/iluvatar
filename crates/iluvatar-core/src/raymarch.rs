@@ -290,7 +290,9 @@ impl Raymarcher {
 
             let dir_camera = self.intrinsics.pixel_to_ray(pixel.x as f32, pixel.y as f32);
             let dir_enu = camera_to_enu * dir_camera;
-            let ray = Ray::new(origin, dir_enu, pixel.intensity as f32);
+            let Ok(ray) = Ray::try_new(origin, dir_enu, pixel.intensity as f32) else {
+                continue;
+            };
             self.march_ray_dda(&ray, &mut contributions);
         }
 
@@ -339,7 +341,9 @@ impl Raymarcher {
 
             let dir_camera = self.intrinsics.pixel_to_ray(x as f32, y as f32);
             let dir_enu = camera_to_enu * dir_camera;
-            let ray = Ray::new(origin, dir_enu, intensity as f32);
+            let Ok(ray) = Ray::try_new(origin, dir_enu, intensity as f32) else {
+                continue;
+            };
             self.march_ray_dda(&ray, &mut contributions);
         }
 
@@ -388,7 +392,9 @@ impl Raymarcher {
             }
             let dir_camera = self.intrinsics.pixel_to_ray(pixel.x as f32, pixel.y as f32);
             let dir_enu = camera_to_enu * dir_camera;
-            let ray = Ray::new(origin, dir_enu, pixel.intensity as f32);
+            let Ok(ray) = Ray::try_new(origin, dir_enu, pixel.intensity as f32) else {
+                continue;
+            };
             self.march_ray_dda(&ray, &mut contributions);
         }
 
@@ -606,6 +612,40 @@ mod tests {
         let (nx, ny) = raymarcher.pixel_to_ndc(960, 540);
         assert!((nx).abs() < 0.01);
         assert!((ny).abs() < 0.01);
+    }
+
+    #[test]
+    fn invalid_distortion_ray_is_skipped_without_panicking() {
+        let intrinsics = CameraIntrinsics {
+            focal_length: Vec2::new(36.18623, 232.41254),
+            principal_point: Vec2::new(8.585283, 17.346178),
+            resolution: UVec2::new(64, 64),
+            fov: Fov {
+                horizontal: 1.0,
+                vertical: 1.0,
+            },
+            distortion: DistortionModel::KannalaBrandt4 {
+                k1: -51.518726,
+                k2: -20.060455,
+                k3: 0.178051,
+                k4: -6.8749666,
+            },
+        };
+        let mut raymarcher = Raymarcher::new(
+            intrinsics,
+            RaymarchConfig::default(),
+            BoundingBox::new(Vec3::splat(-100.0), Vec3::splat(100.0)),
+            1.0,
+            GeoPosition::from_local_xyz(0.0, 0.0, 0.0),
+            CoordinateMode::Local,
+            MAX_CONTRIBUTIONS_PER_FRAME,
+        );
+        let pixels = [MotionPixel::new(37, 30, 10)];
+
+        let contributions =
+            raymarcher.raymarch_motion_pixels(&test_pose_with_orientation(Quat::IDENTITY), &pixels);
+
+        assert!(contributions.is_empty());
     }
 
     #[test]

@@ -230,7 +230,6 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
                 &registry,
                 &grid_config,
                 &raymarch_config,
-                &clock,
                 &mut grid,
             );
 
@@ -245,7 +244,6 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
                             &registry,
                             &grid_config,
                             &raymarch_config,
-                            &clock,
                             &mut grid,
                         );
                         drained += 1;
@@ -395,7 +393,6 @@ fn process_message(
     registry: &Arc<RwLock<CameraRegistry>>,
     grid_config: &GridConfigMessage,
     raymarch_config: &RaymarchConfig,
-    clock: &Arc<Clock>,
     grid: &mut FlatVoxelGrid,
 ) {
     match msg {
@@ -428,10 +425,7 @@ fn process_message(
         CameraMessage::Motion(motion_frame) => {
             process_motion_frame(motion_frame, state, registry, grid);
         }
-        CameraMessage::TimeSync { timestamp } => {
-            clock.set_simulated_time(timestamp);
-        }
-        _ => {}
+        CameraMessage::Heartbeat { .. } | CameraMessage::TimeSync { .. } => {}
     }
 }
 
@@ -459,7 +453,13 @@ fn process_motion_frame(
         let pixels: Vec<_> = motion_frame.motion.pixels().collect();
         profile_plot!("motion_pixels", pixels.len());
 
-        let camera_bit = 1u64 << motion_frame.camera_id;
+        let Some(camera_bit) = 1u64.checked_shl(motion_frame.camera_id as u32) else {
+            warn!(
+                camera_id = motion_frame.camera_id,
+                "Camera id exceeds bitmask"
+            );
+            return;
+        };
         {
             profile_scope!("raymarch");
             rm.raymarch_into(&motion_frame.pose, &pixels, &mut |key, intensity| {

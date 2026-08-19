@@ -11,6 +11,7 @@ pub mod quic;
 pub mod tcp;
 pub mod time;
 pub mod tracker;
+pub mod validation;
 pub mod websocket;
 
 pub use config::ServerConfig;

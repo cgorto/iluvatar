@@ -2,8 +2,7 @@ use async_channel::Sender;
 use futures_lite::io::AsyncReadExt;
 use futures_lite::io::AsyncWriteExt;
 use iluvatar_core::{
-    CameraMessage, CameraRegistration, FrameFormat, GridConfigMessage, ServerMessage,
-    ServerPreferences,
+    CameraMessage, FrameFormat, GridConfigMessage, ServerMessage, ServerPreferences,
     protocol::{self, FrameError, MAX_MESSAGE_SIZE},
 };
 use parking_lot::RwLock;
@@ -13,7 +12,10 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use crate::camera_mgmt::CameraRegistry;
+use crate::{
+    camera_mgmt::CameraRegistry,
+    validation::{self, ValidationError},
+};
 
 #[derive(Debug, Error)]
 pub enum TcpError {
@@ -134,6 +136,8 @@ async fn handle_connection(
         }
     };
 
+    validation::validate_registration(&registration, grid_config.coordinate_mode)?;
+
     let camera_id = registration.camera_id;
     let supports_motion = registration.capabilities.motion_frames;
     info!(
@@ -144,26 +148,17 @@ async fn handle_connection(
     );
 
     // Add to registry.
-    registry.write().register(CameraRegistration {
-        version: registration.version,
-        camera_id: registration.camera_id,
-        intrinsics: registration.intrinsics,
-        initial_pose: registration.initial_pose,
-        capabilities: registration.capabilities.clone(),
-    });
+    let session_id = registry
+        .write()
+        .register(registration.clone())
+        .ok_or(ConnectionError::Protocol("Registration was rejected"))?;
 
     // Respond with preferences and grid config.
     send_registration_response(&mut stream, camera_id, supports_motion, &grid_config).await?;
 
     // Forward registration to main loop (creates per-camera raymarcher).
     let _ = msg_tx
-        .send(CameraMessage::Register(CameraRegistration {
-            version: registration.version,
-            camera_id: registration.camera_id,
-            intrinsics: registration.intrinsics,
-            initial_pose: registration.initial_pose,
-            capabilities: registration.capabilities.clone(),
-        }))
+        .send(CameraMessage::Register(registration.clone()))
         .await;
 
     // Receive loop: read length-prefixed messages until disconnect.
@@ -192,6 +187,11 @@ async fn handle_connection(
             }
         };
 
+        if let Err(error) = validation::validate_message(&msg, &registration, &grid_config) {
+            warn!(camera_id, %error, "Rejecting invalid camera message");
+            break;
+        }
+
         if let Err(e) = msg_tx.try_send(msg) {
             warn!(
                 camera_id = camera_id,
@@ -201,11 +201,12 @@ async fn handle_connection(
     }
 
     // Mark camera as disconnected.
-    registry.write().disconnect(camera_id);
+    registry.write().disconnect(camera_id, session_id);
     Ok(())
 }
 
-/// Send RegisteredWithPrefs + GridConfig (v2) or GridConfig only (v1).
+/// Send negotiated preferences for motion cameras or only the grid for
+/// contribution cameras. Both modes use protocol version 2.
 async fn send_registration_response(
     stream: &mut TcpStream,
     camera_id: u64,
@@ -253,6 +254,8 @@ enum ConnectionError {
     Deserialize(postcard::Error),
     #[error("Serialize error: {0}")]
     Serialize(postcard::Error),
+    #[error("Validation error: {0}")]
+    Validation(#[from] ValidationError),
     #[error("Protocol error: {0}")]
     Protocol(&'static str),
 }

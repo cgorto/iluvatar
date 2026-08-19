@@ -30,7 +30,7 @@ jobs:
         run: |
           bash -n embedded/k230/camera/build.sh embedded/k230/reader/build_reader.sh
           python3 -m py_compile embedded/k230/tools/build_firmware.py
-          gcc -O2 -Wall -Wextra -Werror \
+          gcc -O2 -Wall -Wextra -Werror -pthread \
             -Iembedded/k230/reader/vendor \
             -c embedded/k230/reader/reader.c \
             -o /tmp/iluvatar-reader.o

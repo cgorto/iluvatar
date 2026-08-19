@@ -26,7 +26,7 @@ are observations from development instrumentation, not a formal comparative benc
 | Test | Observed result | What it establishes |
 |---|---:|---|
 | Native OV5647 mode 44, raw VICAP, no AE | 59–60 FPS | Sensor and capture path can reach 60 FPS |
-| Mode 24, AE/AWB, ISP downscale to 1280×720, complete edge processing | 30 FPS | Stable full camera loop |
+| Mode 24, AE/AWB, 1280×720 VICAP output, complete edge processing | 30 FPS | Stable full camera loop |
 | DATAFIFO plus Linux TCP forwarder | 30 FPS, no reported drops | Cross-core and network path keeps up with camera |
 | Release server with real camera stream | 30 FPS | Full real stream is raymarched without backlog |
 | Release server with each real input duplicated once | 60.0–60.1 FPS | Server throughput at controlled 60 FPS input |
@@ -51,7 +51,7 @@ The stable sensor-mode-24 run reported a frame period near 33.3 ms:
 The capture wait is sensor-paced; processing occupies approximately 7.6 ms of the
 frame. The native 720p mode reached 60 FPS without AE, but enabling automatic exposure
 on the validated firmware reduced and destabilized its rate. The full path therefore
-uses the proven 1080p mode with ISP downscaling and AE/AWB at 30 FPS.
+uses the proven 1080p sensor mode, a 1280×720 VICAP channel, and AE/AWB at 30 FPS.
 
 ## Motion density
 

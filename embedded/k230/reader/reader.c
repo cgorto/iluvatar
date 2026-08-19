@@ -25,6 +25,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
@@ -43,7 +45,10 @@ static int tcp_connect(const char *host, int port)
     if (fd < 0) { perror("socket"); return -1; }
 
     int flag = 1;
+    struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -53,8 +58,32 @@ static int tcp_connect(const char *host, int port)
         fprintf(stderr, "Invalid address: %s\n", host);
         close(fd); return -1;
     }
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    int old_flags = fcntl(fd, F_GETFL, 0);
+    if (old_flags < 0 || fcntl(fd, F_SETFL, old_flags | O_NONBLOCK) < 0) {
+        perror("fcntl"); close(fd); return -1;
+    }
+
+    int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
         perror("connect"); close(fd); return -1;
+    }
+    if (rc < 0) {
+        struct pollfd candidate = { .fd = fd, .events = POLLOUT };
+        rc = poll(&candidate, 1, 5000);
+        if (rc <= 0) {
+            if (rc == 0) errno = ETIMEDOUT;
+            perror("connect"); close(fd); return -1;
+        }
+        int socket_error = 0;
+        socklen_t error_size = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_size) < 0
+            || socket_error != 0) {
+            if (socket_error != 0) errno = socket_error;
+            perror("connect"); close(fd); return -1;
+        }
+    }
+    if (fcntl(fd, F_SETFL, old_flags) < 0) {
+        perror("fcntl"); close(fd); return -1;
     }
     return fd;
 }
@@ -63,7 +92,7 @@ static int tcp_send_all(int fd, const void *buf, size_t len)
 {
     const char *p = (const char *)buf;
     while (len > 0) {
-        ssize_t n = send(fd, p, len, 0);
+        ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
         if (n <= 0) { perror("send"); return -1; }
         p += n;
         len -= (size_t)n;
@@ -167,10 +196,9 @@ typedef struct {
     int             ready;      /* New data available. */
     int             quit;       /* Signal thread to exit. */
     int             fd;         /* TCP socket. */
-    int             nonblock;   /* Use non-blocking send (skip on EAGAIN). */
     const char     *name;       /* For log messages. */
     uint64_t        sent;       /* Frames successfully sent. */
-    uint64_t        dropped;    /* Frames skipped (overwritten or EAGAIN). */
+    uint64_t        dropped;    /* Frames overwritten before transmission. */
 
     /* Reconnect state (server thread only). */
     char            host[64];
@@ -181,16 +209,11 @@ typedef struct {
 
 static void send_buf_init(send_buf_t *sb, int fd, const char *name)
 {
+    memset(sb, 0, sizeof(*sb));
     pthread_mutex_init(&sb->mutex, NULL);
     pthread_cond_init(&sb->cond, NULL);
-    sb->size = 0;
-    sb->ready = 0;
-    sb->quit = 0;
     sb->fd = fd;
-    sb->nonblock = 0;
     sb->name = name;
-    sb->sent = 0;
-    sb->dropped = 0;
 }
 
 /* Called by main thread: copy new data into the buffer. */
@@ -205,22 +228,28 @@ static void send_buf_push(send_buf_t *sb, const void *data, uint32_t size)
     pthread_mutex_unlock(&sb->mutex);
 }
 
-/* Try to send all bytes without blocking. Returns 0 on success, -1
- * on error, 1 if the socket would block (partial send not attempted). */
-static int tcp_send_nonblock(int fd, const void *buf, size_t len)
+static void send_buf_record(send_buf_t *sb, int sent, int dropped)
 {
-    const char *p = (const char *)buf;
-    while (len > 0) {
-        ssize_t n = send(fd, p, len, MSG_DONTWAIT);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
-            perror("send");
-            return -1;
-        }
-        p += n;
-        len -= (size_t)n;
-    }
-    return 0;
+    pthread_mutex_lock(&sb->mutex);
+    sb->sent += (uint64_t)sent;
+    sb->dropped += (uint64_t)dropped;
+    pthread_mutex_unlock(&sb->mutex);
+}
+
+static void send_buf_stats(send_buf_t *sb, uint64_t *sent, uint64_t *dropped)
+{
+    pthread_mutex_lock(&sb->mutex);
+    *sent = sb->sent;
+    *dropped = sb->dropped;
+    pthread_mutex_unlock(&sb->mutex);
+}
+
+static int send_buf_should_quit(send_buf_t *sb)
+{
+    pthread_mutex_lock(&sb->mutex);
+    int quit = sb->quit;
+    pthread_mutex_unlock(&sb->mutex);
+    return quit;
 }
 
 /* Reconnect to the server: close old socket, connect, re-register.
@@ -233,7 +262,7 @@ static int server_reconnect(send_buf_t *sb)
     int max_delay_ms = 30000;
 
     for (int attempt = 0; attempt < 20; attempt++) {
-        if (sb->quit) return -1;
+        if (send_buf_should_quit(sb)) return -1;
 
         fprintf(stderr, "%s: reconnecting to %s:%d (attempt %d, backoff %dms)...\n",
                 sb->name, sb->host, sb->port, attempt + 1, delay_ms);
@@ -287,14 +316,7 @@ static void *send_thread(void *arg)
         sb->ready = 0;
         pthread_mutex_unlock(&sb->mutex);
 
-        int rc;
-        if (sb->nonblock) {
-            rc = tcp_send_nonblock(sb->fd, local, local_size);
-            if (rc == 1) { sb->dropped++; continue; }
-        } else {
-            rc = tcp_send_all(sb->fd, local, local_size);
-        }
-
+        int rc = tcp_send_all(sb->fd, local, local_size);
         if (rc < 0) {
             /* Send failed. If this is the server thread (has reconnect
              * state), try to reconnect. Viewer thread just exits. */
@@ -312,7 +334,7 @@ static void *send_thread(void *arg)
                 break;
             }
         }
-        sb->sent++;
+        send_buf_record(sb, 1, 0);
     }
     return NULL;
 }
@@ -437,13 +459,24 @@ int main(int argc, char *argv[])
     server_buf.port = port;
     memcpy(server_buf.reg_buf, reg_buf, (size_t)reg_len);
     server_buf.reg_len = reg_len;
-    pthread_create(&server_thread, NULL, send_thread, &server_buf);
+    int thread_rc = pthread_create(&server_thread, NULL, send_thread, &server_buf);
+    if (thread_rc != 0) {
+        fprintf(stderr, "server thread: %s\n", strerror(thread_rc));
+        kd_datafifo_close(fifo_handle);
+        close(tcp_fd);
+        return 1;
+    }
 
     int has_viewer = (viewer_fd >= 0);
     if (has_viewer) {
         send_buf_init(&viewer_buf, viewer_fd, "viewer");
-        viewer_buf.nonblock = 1; /* Skip frames rather than block. */
-        pthread_create(&viewer_thread, NULL, send_thread, &viewer_buf);
+        thread_rc = pthread_create(&viewer_thread, NULL, send_thread, &viewer_buf);
+        if (thread_rc != 0) {
+            fprintf(stderr, "viewer thread: %s; continuing without viewer\n",
+                    strerror(thread_rc));
+            close(viewer_fd);
+            has_viewer = 0;
+        }
     }
 
     printf("Forwarding motion frames (%s viewer)...\n",
@@ -506,12 +539,17 @@ int main(int argc, char *argv[])
         frames_read++;
 
         if (frames_read <= 10 || frames_read % 100 == 0) {
+            uint64_t server_sent = 0, server_dropped = 0;
+            uint64_t viewer_sent = 0, viewer_dropped = 0;
+            send_buf_stats(&server_buf, &server_sent, &server_dropped);
+            if (has_viewer)
+                send_buf_stats(&viewer_buf, &viewer_sent, &viewer_dropped);
+
             printf("read=%lu srv_sent=%lu srv_drop=%lu",
-                   frames_read, server_buf.sent, server_buf.dropped);
-            if (has_viewer) {
+                   frames_read, server_sent, server_dropped);
+            if (has_viewer)
                 printf(" view_sent=%lu view_drop=%lu",
-                       viewer_buf.sent, viewer_buf.dropped);
-            }
+                       viewer_sent, viewer_dropped);
             printf("\n");
         }
     }
@@ -522,13 +560,19 @@ int main(int argc, char *argv[])
     if (has_viewer) {
         send_buf_stop(&viewer_buf);
         pthread_join(viewer_thread, NULL);
-        close(viewer_fd);
     }
 
+    uint64_t server_sent = 0, server_dropped = 0;
+    uint64_t viewer_sent = 0, viewer_dropped = 0;
+    send_buf_stats(&server_buf, &server_sent, &server_dropped);
+    if (has_viewer)
+        send_buf_stats(&viewer_buf, &viewer_sent, &viewer_dropped);
+
     kd_datafifo_close(fifo_handle);
-    close(tcp_fd);
-    printf("=== Reader exit: read=%lu srv=%lu view=%lu ===\n",
-           frames_read, server_buf.sent,
-           has_viewer ? viewer_buf.sent : 0);
+    if (server_buf.fd >= 0) close(server_buf.fd);
+    if (has_viewer && viewer_buf.fd >= 0) close(viewer_buf.fd);
+    printf("=== Reader exit: read=%lu srv=%lu/%lu view=%lu/%lu ===\n",
+           frames_read, server_sent, server_dropped,
+           viewer_sent, viewer_dropped);
     return 0;
 }
