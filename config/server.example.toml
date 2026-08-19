@@ -1,8 +1,7 @@
 # Example configuration matching the K230 registration in embedded/k230/camera.
 
 [server]
-listen_address = "0.0.0.0:4433"       # Optional QUIC camera transport.
-tcp_listen_address = "0.0.0.0:4434"   # K230 Linux forwarder.
+listen_address = "0.0.0.0:4434"       # K230 Linux forwarder.
 websocket_port = 18080
 broadcast_rate_hz = 10.0
 

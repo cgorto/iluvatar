@@ -548,7 +548,7 @@ pub fn deserialize<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T, postcard
     postcard::from_bytes(data)
 }
 
-// Framing utilities for QUIC streams
+// Length-prefixed wire framing shared by the TCP transport and embedded forwarder.
 /// Hard wire-frame limit. The K230's largest DATAFIFO payload is 256 KiB;
 /// 1 MiB leaves room for other negotiated formats without allowing one peer
 /// to force a multi-megabyte allocation before semantic validation.
@@ -556,7 +556,6 @@ pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum FrameError {
-    Io(std::io::Error),
     TooLarge(usize),
     Truncated,
     /// Data length exceeds u32::MAX and cannot be encoded in a 4-byte length prefix
@@ -566,7 +565,6 @@ pub enum FrameError {
 impl std::fmt::Display for FrameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FrameError::Io(e) => write!(f, "IO error: {}", e),
             FrameError::TooLarge(size) => {
                 write!(
                     f,
@@ -588,36 +586,6 @@ impl std::fmt::Display for FrameError {
 }
 
 impl std::error::Error for FrameError {}
-
-impl From<std::io::Error> for FrameError {
-    fn from(e: std::io::Error) -> Self {
-        FrameError::Io(e)
-    }
-}
-
-/// Read a length-prefixed frame from a QUIC receive stream.
-/// Format: 4-byte big-endian length prefix followed by payload.
-pub async fn read_framed(recv: &mut quinn::RecvStream) -> Result<Vec<u8>, FrameError> {
-    // Read 4-byte length prefix
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf)
-        .await
-        .map_err(|_| FrameError::Truncated)?;
-
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    if len > MAX_MESSAGE_SIZE {
-        return Err(FrameError::TooLarge(len));
-    }
-
-    // Read payload
-    let mut buf = vec![0u8; len];
-    recv.read_exact(&mut buf)
-        .await
-        .map_err(|_| FrameError::Truncated)?;
-
-    Ok(buf)
-}
 
 /// Create a length-prefixed frame for writing.
 /// Format: 4-byte big-endian length prefix followed by payload.

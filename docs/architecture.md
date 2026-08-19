@@ -41,7 +41,7 @@ thread always consumes the newest available frame; overwriting an older unsent f
 increments a drop counter instead of extending queue latency.
 
 The TCP stream uses a four-byte big-endian length followed by a postcard message. The
-wire frame is capped at 1 MiB. Before enqueueing, both TCP and QUIC validate protocol
+wire frame is capped at 1 MiB. Before enqueueing, the TCP boundary validates protocol
 version, connection-bound camera identity, negotiated capabilities, image and RLE
 bounds, pose/intrinsics finiteness, contribution limits, and voxel coordinates. Invalid
 derived rays are fallible and skipped rather than allowed to panic the processing loop.

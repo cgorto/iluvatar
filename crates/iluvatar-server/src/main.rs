@@ -11,7 +11,6 @@ use iluvatar_server::{
     detector::ObjectDetector,
     flat_grid::FlatVoxelGrid,
     profile_frame, profile_plot, profile_scope,
-    quic::QuicServer,
     tcp::TcpServer,
     time::Clock,
     tracker::ObjectTracker,
@@ -55,8 +54,7 @@ fn main() {
 async fn run(config_path: &Path) -> Result<(), ServerError> {
     let config = ServerConfig::load(config_path)?;
     info!(
-        quic_addr = %config.server.listen_address,
-        tcp_addr = ?config.server.tcp_listen_address,
+        tcp_addr = %config.server.listen_address,
         ws_port = config.server.websocket_port,
         "Configuration loaded"
     );
@@ -98,60 +96,30 @@ async fn run(config_path: &Path) -> Result<(), ServerError> {
     let (update_tx, update_rx) =
         async_channel::bounded::<iluvatar_server::websocket::BroadcastMessage>(100);
 
-    // Start QUIC server for cameras.
-    // The QUIC handler is a thin pipe: deserialize and forward. Raymarching
-    // happens in the main processing loop below.
-    let listen_addr: std::net::SocketAddr = config
+    // Start the validated K230 camera transport. Bind before detaching the
+    // accept loop so startup fails visibly if the configured port is unavailable.
+    let tcp_addr: std::net::SocketAddr = config
         .server
         .listen_address
         .parse()
-        .map_err(|e| ServerError::Network(format!("Invalid listen address: {}", e)))?;
+        .map_err(|e| ServerError::Network(format!("Invalid TCP address: {e}")))?;
     let grid_config = config.to_grid_config_message();
     let raymarch_config = config.to_raymarch_config();
-    let registry_clone = registry.clone();
-    let msg_tx_clone = msg_tx.clone();
-    let grid_config_quic = grid_config.clone();
+    let tcp_server = TcpServer::bind(tcp_addr)
+        .await
+        .map_err(|e| ServerError::Network(e.to_string()))?;
+    let msg_tx_tcp = msg_tx.clone();
+    let registry_tcp = registry.clone();
+    let grid_config_tcp = grid_config.clone();
     smol::spawn(async move {
-        match QuicServer::bind(listen_addr, None).await {
-            Ok(server) => {
-                if let Err(e) = server
-                    .run(msg_tx_clone, registry_clone, grid_config_quic)
-                    .await
-                {
-                    error!("QUIC server error: {}", e);
-                }
-            }
-            Err(e) => {
-                error!("Failed to start QUIC server: {}", e);
-            }
+        if let Err(e) = tcp_server
+            .run(msg_tx_tcp, registry_tcp, grid_config_tcp)
+            .await
+        {
+            error!("TCP server error: {e}");
         }
     })
     .detach();
-
-    // Start TCP server for cameras (optional, alongside QUIC).
-    // Same protocol (length-prefixed postcard), different transport. Used by
-    // the Odin camera on K230 where no mature QUIC library exists.
-    if let Some(ref tcp_addr_str) = config.server.tcp_listen_address {
-        let tcp_addr: std::net::SocketAddr = tcp_addr_str
-            .parse()
-            .map_err(|e| ServerError::Network(format!("Invalid TCP address: {}", e)))?;
-        let msg_tx_tcp = msg_tx.clone();
-        let registry_tcp = registry.clone();
-        let grid_config_tcp = grid_config.clone();
-        smol::spawn(async move {
-            match TcpServer::bind(tcp_addr).await {
-                Ok(server) => {
-                    if let Err(e) = server.run(msg_tx_tcp, registry_tcp, grid_config_tcp).await {
-                        error!("TCP server error: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to start TCP server: {}", e);
-                }
-            }
-        })
-        .detach();
-    }
 
     // Start WebSocket server for clients
     let ws_port = config.server.websocket_port;
@@ -399,7 +367,7 @@ fn process_message(
         CameraMessage::Register(registration) => {
             // Create a server-side raymarcher for cameras that send
             // motion pixels. This runs in the main loop so raymarching
-            // doesn't block the QUIC handler.
+            // doesn't block the TCP handler.
             if registration.capabilities.motion_frames {
                 let rm = create_server_raymarcher(
                     &registration,

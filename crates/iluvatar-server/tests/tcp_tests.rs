@@ -1,11 +1,10 @@
 /// TCP listener integration tests.
 ///
-/// Validates that the TCP transport accepts cameras using the same
-/// length-prefixed postcard protocol as QUIC. Each test spins up
-/// a TcpServer on a random port, connects a raw TCP client, and
-/// verifies the registration handshake.
+/// Validates the length-prefixed postcard transport at the actual TCP boundary.
+/// Each test starts a server on a random port and connects a raw TCP client.
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 use parking_lot::RwLock;
@@ -14,7 +13,8 @@ use smol::net::TcpStream;
 use iluvatar_core::{
     CameraCapabilities, CameraId, CameraIntrinsics, CameraMessage, CameraPose, CameraRegistration,
     CoordinateMode, DistortionModel, Fov, FrameFormat, GeoPosition, GridConfigMessage,
-    LocalizationStatus, PoseUncertainty, ServerMessage,
+    LocalizationStatus, MotionData, MotionFrame, MotionPixel, MotionRun, PoseUncertainty,
+    ServerMessage,
     protocol::{self, MAX_MESSAGE_SIZE},
 };
 use iluvatar_server::camera_mgmt::CameraRegistry;
@@ -78,6 +78,29 @@ async fn write_framed(stream: &mut TcpStream, data: &[u8]) {
     stream.write_all(data).await.unwrap();
 }
 
+async fn assert_connection_closed(stream: &mut TcpStream) {
+    let mut byte = [0u8; 1];
+    let result = smol::future::or(async { stream.read(&mut byte).await }, async {
+        smol::Timer::after(Duration::from_secs(1)).await;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "server did not close rejected connection",
+        ))
+    })
+    .await;
+    assert_eq!(result.expect("read after rejection"), 0);
+}
+
+fn motion_message(camera_id: CameraId, motion: MotionData) -> CameraMessage {
+    CameraMessage::Motion(MotionFrame {
+        camera_id,
+        sequence: 1,
+        timestamp: 1_000,
+        pose: test_registration(camera_id).initial_pose,
+        motion,
+    })
+}
+
 /// Spawn a TcpServer on an ephemeral port and return the address plus
 /// the message channel receiver for inspecting forwarded messages.
 async fn spawn_server() -> (SocketAddr, async_channel::Receiver<CameraMessage>) {
@@ -97,6 +120,22 @@ async fn spawn_server() -> (SocketAddr, async_channel::Receiver<CameraMessage>) 
     .detach();
 
     (addr, msg_rx)
+}
+
+async fn register_motion_camera(
+    stream: &mut TcpStream,
+    msg_rx: &async_channel::Receiver<CameraMessage>,
+    camera_id: CameraId,
+) {
+    let registration = CameraMessage::Register(test_registration(camera_id));
+    let bytes = protocol::serialize(&registration).unwrap();
+    write_framed(stream, &bytes).await;
+    let _ = read_framed(stream).await; // RegisteredWithPrefs
+    let _ = read_framed(stream).await; // GridConfig
+    assert!(matches!(
+        msg_rx.recv().await.unwrap(),
+        CameraMessage::Register(reg) if reg.camera_id == camera_id
+    ));
 }
 
 #[test]
@@ -171,8 +210,6 @@ fn test_tcp_registration_contribution_camera() {
 
 #[test]
 fn test_tcp_frame_forwarding() {
-    use iluvatar_core::{MotionData, MotionFrame, MotionPixel};
-
     smol::block_on(async {
         let (addr, msg_rx) = spawn_server().await;
 
@@ -214,5 +251,77 @@ fn test_tcp_frame_forwarding() {
             }
             other => panic!("Expected Motion on channel, got {:?}", other),
         }
+    });
+}
+
+#[test]
+fn oversized_frame_is_rejected_before_allocation() {
+    smol::block_on(async {
+        let (addr, msg_rx) = spawn_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let oversized = u32::try_from(MAX_MESSAGE_SIZE + 1).unwrap();
+
+        stream.write_all(&oversized.to_be_bytes()).await.unwrap();
+
+        assert_connection_closed(&mut stream).await;
+        assert!(msg_rx.try_recv().is_err());
+    });
+}
+
+#[test]
+fn malformed_registration_is_rejected() {
+    smol::block_on(async {
+        let (addr, msg_rx) = spawn_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        write_framed(&mut stream, &[0xff]).await;
+
+        assert_connection_closed(&mut stream).await;
+        assert!(msg_rx.try_recv().is_err());
+    });
+}
+
+#[test]
+fn registered_camera_cannot_spoof_another_identity() {
+    smol::block_on(async {
+        let (addr, msg_rx) = spawn_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        register_motion_camera(&mut stream, &msg_rx, 1).await;
+        let spoofed = motion_message(2, MotionData::Sparse(vec![MotionPixel::new(10, 10, 1)]));
+
+        write_framed(&mut stream, &protocol::serialize(&spoofed).unwrap()).await;
+
+        assert_connection_closed(&mut stream).await;
+        assert!(msg_rx.try_recv().is_err());
+    });
+}
+
+#[test]
+fn unnegotiated_rle_is_rejected_at_tcp_boundary() {
+    smol::block_on(async {
+        let (addr, msg_rx) = spawn_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        register_motion_camera(&mut stream, &msg_rx, 1).await;
+        let rle = motion_message(1, MotionData::RunLength(vec![MotionRun::new(0, 0, 10, 1)]));
+
+        write_framed(&mut stream, &protocol::serialize(&rle).unwrap()).await;
+
+        assert_connection_closed(&mut stream).await;
+        assert!(msg_rx.try_recv().is_err());
+    });
+}
+
+#[test]
+fn out_of_bounds_pixel_is_rejected_at_tcp_boundary() {
+    smol::block_on(async {
+        let (addr, msg_rx) = spawn_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        register_motion_camera(&mut stream, &msg_rx, 1).await;
+        let invalid = motion_message(1, MotionData::Sparse(vec![MotionPixel::new(1280, 10, 1)]));
+
+        write_framed(&mut stream, &protocol::serialize(&invalid).unwrap()).await;
+
+        assert_connection_closed(&mut stream).await;
+        assert!(msg_rx.try_recv().is_err());
     });
 }

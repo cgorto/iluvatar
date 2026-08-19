@@ -26,11 +26,7 @@ tracing-subscriber = { workspace = true }
 smol = { workspace = true }
 async-channel = { workspace = true }
 futures-lite = { workspace = true }
-async-compat = { workspace = true }
 futures = "0.3"
-quinn = { workspace = true }
-rustls = { workspace = true }
-rcgen = { workspace = true }
 
 # WebSocket
 async-tungstenite = { version = "0.28", features = ["async-std-runtime"] }

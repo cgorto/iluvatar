@@ -62,11 +62,8 @@ pub struct CameraEntry {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NetworkSettings {
+    /// TCP listen address for camera connections.
     pub listen_address: String,
-    /// Optional TCP listen address for cameras that connect via plain TCP
-    /// instead of QUIC (e.g. Odin camera on K230). Same protocol, different
-    /// transport. Example: "0.0.0.0:5001"
-    pub tcp_listen_address: Option<String>,
     #[serde(default = "default_websocket_port")]
     pub websocket_port: u16,
     #[serde(default = "default_broadcast_rate_hz")]
@@ -333,10 +330,7 @@ mod tests {
         let source = include_str!("../../../config/server.example.toml");
         let config: ServerConfig = toml::from_str(source).expect("server example must stay valid");
 
-        assert_eq!(
-            config.server.tcp_listen_address.as_deref(),
-            Some("0.0.0.0:4434")
-        );
+        assert_eq!(config.server.listen_address, "0.0.0.0:4434");
         assert_eq!(config.coordinate_mode(), CoordinateMode::Gps);
         assert_eq!(config.grid.max_voxels, 200_000);
     }

@@ -42,9 +42,8 @@ impl TcpServer {
             .expect("bound listener has local addr")
     }
 
-    /// Accept camera connections and forward messages to the processing
-    /// pipeline. Mirrors the QUIC server contract: thin deserialize-and-forward
-    /// loop, no heavy computation.
+    /// Accept camera connections and forward validated messages to the
+    /// processing pipeline without doing heavy spatial computation.
     pub async fn run(
         self,
         msg_tx: Sender<CameraMessage>,
@@ -72,10 +71,6 @@ impl TcpServer {
 
 // ---------------------------------------------------------------------------
 // TCP framing: 4-byte big-endian length prefix + postcard payload.
-// Identical wire format to QUIC framing, but reads from a TcpStream
-// instead of a quinn::RecvStream. Kept here rather than generalising
-// protocol.rs — the two callers use different async I/O traits and
-// sharing would require a trait bound that adds complexity for no gain.
 // ---------------------------------------------------------------------------
 
 /// Read one length-prefixed message from a TCP stream.

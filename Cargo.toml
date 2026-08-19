@@ -23,11 +23,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 smol = "2.0"
 async-channel = "2.3"
 futures-lite = "2.5"
-async-compat = "0.2"
-
-quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rcgen = "0.13"
 
 iluvatar-core = { path = "crates/iluvatar-core" }
 iluvatar-server = { path = "crates/iluvatar-server" }
