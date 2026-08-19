@@ -22,6 +22,11 @@ This repository is a curated engineering prototype, not a production surveillanc
 system. It preserves the working system and the evidence behind it while keeping
 unfinished product work out of the public surface.
 
+![Four-camera simulator reconstructing and tracking a moving target](docs/simulator-demo.gif)
+
+*Geometric simulation: four cameras contribute sparse rays to a shared voxel grid;
+the reconstructed object is clustered and tracked with live position-error telemetry.*
+
 ## What was validated
 
 On a CanMV-K230 with an OV5647 sensor:

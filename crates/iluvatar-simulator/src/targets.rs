@@ -3,7 +3,7 @@ use crate::render_layers::target_layers;
 use bevy::prelude::*;
 
 const TARGET_MODEL_PATH: &str = "models/craft_speederD.glb";
-const TARGET_SCALE: f32 = 5.0;
+const TARGET_SCALE: f32 = 20.0;
 
 pub struct TargetsPlugin;
 

@@ -125,7 +125,25 @@ fn debug_ui_system(
 
     egui::Window::new("Detection & Tracking")
         .default_width(320.0)
+        .vscroll(true)
         .show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(format!(
+                    "{} track{}",
+                    tracking_state.tracked_objects.len(),
+                    if tracking_state.tracked_objects.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+                ui.separator();
+                ui.label(format!("{} active voxels", grid_res.grid.active_count()));
+                ui.separator();
+                ui.label(format!("{:.2} m error", metrics.avg_position_error));
+            });
+            ui.separator();
+
             // === Extraction Section ===
             ui.heading("Extraction");
             ui.separator();

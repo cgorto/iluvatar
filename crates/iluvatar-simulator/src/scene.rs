@@ -1,7 +1,7 @@
 //! Simple scene setup - ground plane and basic lighting
 
 use bevy::{camera_controller::free_camera::FreeCamera, prelude::*};
-use bevy_egui::{EguiContext, PrimaryEguiContext};
+use bevy_egui::{EguiGlobalSettings, PrimaryEguiContext};
 
 use crate::render_layers::{debug_camera_layers, light_layers, scene_layers};
 
@@ -9,29 +9,7 @@ pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_scene)
-            .add_systems(First, deduplicate_primary_egui_context);
-    }
-}
-
-/// Ensure exactly one entity has `PrimaryEguiContext`.
-///
-/// bevy_egui may add `PrimaryEguiContext` + `EguiContext` to multiple entities
-/// (windows, cameras). We keep it on the first entity that has an `EguiContext`
-/// (typically the window) and strip it from all others.
-///
-/// This MUST be an exclusive system (takes `&mut World`) so the removal is immediate,
-/// not deferred like `Commands`. Deferred removal would still leave duplicates when
-/// `EguiPrimaryContextPass` runs later in the same frame.
-fn deduplicate_primary_egui_context(world: &mut World) {
-    let all_primaries: Vec<Entity> = world
-        .query_filtered::<Entity, (With<PrimaryEguiContext>, With<EguiContext>)>()
-        .iter(world)
-        .collect();
-
-    // Keep only the first one, remove from the rest
-    for entity in all_primaries.iter().skip(1) {
-        world.entity_mut(*entity).remove::<PrimaryEguiContext>();
+        app.add_systems(Startup, setup_scene);
     }
 }
 
@@ -39,7 +17,11 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut egui_global_settings: ResMut<EguiGlobalSettings>,
 ) {
+    // The simulator has multiple off-screen cameras. Disable bevy_egui's
+    // automatic camera selection and explicitly attach the UI below.
+    egui_global_settings.auto_create_primary_context = false;
     // Ground plane - large flat surface (layer 0 - scene geometry)
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(2000.0, 2000.0))),
@@ -77,13 +59,17 @@ fn setup_scene(
     // Renders last (highest order) so egui UI is drawn on top of the 3D scene
     commands.spawn((
         Camera3d::default(),
+        // Pin egui to the actual viewer camera. Letting bevy_egui choose from the
+        // simulator's off-screen capture cameras can attach the UI to a camera
+        // without a render graph, leaving the controls invisible.
+        PrimaryEguiContext,
         Camera {
             // Render after all render cameras (which have negative orders like -1, -2, -3, -4)
             order: 100,
             ..default()
         },
         FreeCamera::default(),
-        Transform::from_xyz(0.0, 300.0, 600.0).looking_at(Vec3::new(0.0, 150.0, 0.0), Vec3::Y),
+        Transform::from_xyz(0.0, 260.0, 420.0).looking_at(Vec3::new(0.0, 190.0, 0.0), Vec3::Y),
         // Debug camera sees everything: layers 0, 1, and 2
         debug_camera_layers(),
     ));

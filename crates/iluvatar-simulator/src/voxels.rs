@@ -21,14 +21,15 @@ use iluvatar_server::time::Clock;
 
 use crate::camera::CaptureCamera;
 use crate::render_camera::RenderCamera;
+use crate::sim_config::SimulatorTomlConfig;
 use crate::targets::Target;
 
 pub struct VoxelsPlugin;
 
 impl Plugin for VoxelsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<VoxelGridResource>()
-            .init_resource::<SimulatorConfig>()
+        app.init_resource::<SimulatorConfig>()
+            .init_resource::<VoxelGridResource>()
             .add_systems(
                 Update,
                 (
@@ -48,8 +49,8 @@ pub struct VoxelsPluginWithoutRaymarch;
 
 impl Plugin for VoxelsPluginWithoutRaymarch {
     fn build(&self, app: &mut App) {
-        app.init_resource::<VoxelGridResource>()
-            .init_resource::<SimulatorConfig>()
+        app.init_resource::<SimulatorConfig>()
+            .init_resource::<VoxelGridResource>()
             .add_systems(
                 Update,
                 (
@@ -79,6 +80,17 @@ pub struct SimulatorConfig {
     pub ray_intensity: f32,
     /// Intensity threshold for visualization
     pub visualization_threshold: f32,
+}
+
+impl From<&SimulatorTomlConfig> for SimulatorConfig {
+    fn from(config: &SimulatorTomlConfig) -> Self {
+        Self {
+            voxel_size: config.grid.voxel_size,
+            grid_dimensions: UVec3::from_array(config.grid.dimensions),
+            grid_origin: Vec3::from_array(config.grid.origin),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for SimulatorConfig {

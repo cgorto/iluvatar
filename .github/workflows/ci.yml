@@ -11,13 +11,16 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install simulator system dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libasound2-dev libudev-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets --locked
@@ -25,7 +28,7 @@ jobs:
   embedded-source:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check scripts and Linux forwarder
         run: |
           bash -n embedded/k230/camera/build.sh embedded/k230/reader/build_reader.sh

@@ -100,5 +100,10 @@ mod tests {
 
         assert_eq!(config.cameras.len(), 4);
         assert_eq!(config.cameras[0].resolution, [1280, 720]);
+
+        let runtime = crate::voxels::SimulatorConfig::from(&config);
+        assert_eq!(runtime.grid_origin, Vec3::new(-500.0, 0.0, -500.0));
+        assert_eq!(runtime.grid_dimensions, UVec3::new(1000, 400, 1000));
+        assert_eq!(runtime.voxel_size, 1.0);
     }
 }

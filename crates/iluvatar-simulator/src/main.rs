@@ -1,5 +1,7 @@
 use bevy::{asset::AssetPlugin, prelude::*};
-use iluvatar_simulator::{RenderSimulatorPlugin, SimulatorPlugin, SimulatorTomlConfig};
+use iluvatar_simulator::{
+    RenderSimulatorPlugin, SimulatorConfig, SimulatorPlugin, SimulatorTomlConfig,
+};
 use std::path::Path;
 
 fn main() {
@@ -47,6 +49,7 @@ fn main() {
                     path,
                     config.cameras.len()
                 );
+                app.insert_resource(SimulatorConfig::from(&config));
                 app.insert_resource(config);
             }
             Err(e) => {
@@ -65,6 +68,7 @@ fn main() {
                         default_path,
                         config.cameras.len()
                     );
+                    app.insert_resource(SimulatorConfig::from(&config));
                     app.insert_resource(config);
                 }
                 Err(e) => {
